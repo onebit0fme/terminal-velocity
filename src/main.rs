@@ -40,17 +40,30 @@ struct Config {
     color_off: bool,
     all_time: bool,
     me: bool,
+    at: Option<String>,
 }
+
+/// A repo's resolved as-of point: the git rev to drive every pass off
+/// (`"HEAD"` by default, or the `--at` commit sha), and whether that is HEAD.
+struct Anchor {
+    rev: String,
+    is_head: bool,
+}
+
+/// The filtered (repos, labels, per-repo anchors) plus an optional header note —
+/// what `resolve_anchors` hands back.
+type Resolved = (Vec<String>, Vec<String>, Vec<Anchor>, Option<String>);
 
 /// Default window for the drill-down commands — matches the cockpit's trailing
 /// 8 weeks, anchored to the latest commit. `--all` widens to full history.
 const WINDOW_SECS: i64 = 8 * 7 * 86_400;
 
-/// Newest commit across all repos — the shared window anchor when aggregating.
-fn latest_ts_across(repos: &[String]) -> Result<i64, String> {
+/// Newest anchored commit across all repos — the shared window anchor. With `--at`
+/// this is the as-of moment, not now, so the window trails the anchor.
+fn latest_ts_across(repos: &[String], anchors: &[Anchor]) -> Result<i64, String> {
     let mut latest: Option<i64> = None;
-    for r in repos {
-        let ts = git::latest_ts(r).map_err(|e| format!("{r}: {e}"))?;
+    for (r, a) in repos.iter().zip(anchors) {
+        let ts = git::commit_ts(r, &a.rev).map_err(|e| format!("{r}: {e}"))?;
         latest = Some(latest.map_or(ts, |m| m.max(ts)));
     }
     latest.ok_or_else(|| "no repositories given".to_string())
@@ -127,6 +140,155 @@ fn repo_labels(repos: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Does this string read as a date rather than a revision? Used to decide whether
+/// a non-rev `--at` value should be handed to git's date parser. Keeps a typo'd
+/// sha from silently resolving to "now" — it must look date-ish to take that path.
+fn looks_like_date(s: &str) -> bool {
+    let l = s.to_ascii_lowercase();
+    const KW: &[&str] = &[
+        "ago",
+        "yesterday",
+        "today",
+        "now",
+        "week",
+        "month",
+        "year",
+        "day",
+        "hour",
+        "minute",
+        "noon",
+        "midnight",
+        "jan",
+        "feb",
+        "mar",
+        "apr",
+        "may",
+        "jun",
+        "jul",
+        "aug",
+        "sep",
+        "oct",
+        "nov",
+        "dec",
+    ];
+    if KW.iter().any(|k| l.contains(k)) {
+        return true;
+    }
+    let has_digit = l.bytes().any(|b| b.is_ascii_digit());
+    let has_sep = l.contains('-') || l.contains('/') || l.contains(':');
+    has_digit && has_sep
+}
+
+/// Resolve a single-repo `--at` value to a commit sha: a git revision if it is one,
+/// otherwise a date snapped to the last commit on/before it. Fail-loud on junk.
+fn resolve_rev_or_date(repo: &str, s: &str) -> Result<String, String> {
+    if let Ok(sha) = git::resolve_rev(repo, s) {
+        return Ok(sha);
+    }
+    if looks_like_date(s) {
+        return match git::snap_before(repo, s)? {
+            Some(sha) => Ok(sha),
+            None => Err(format!("no commit on/before `{s}`")),
+        };
+    }
+    Err(format!(
+        "`{s}` isn't a revision here, and doesn't look like a date"
+    ))
+}
+
+/// Resolve the per-repo `--at` anchor. Returns the (possibly filtered) repos/labels
+/// alongside one [`Anchor`] each, plus a human note for the header.
+///
+/// Multi-repo collapses to a single shared moment in time:
+///   - `label@rev` — that repo pins to the exact commit; its timestamp snaps the rest.
+///   - a date — every repo snaps to its last commit on/before that date.
+///
+/// A bare revision is rejected across repos (a sha exists in only one of them).
+fn resolve_anchors(
+    paths: &[String],
+    labels: &[String],
+    at: Option<&str>,
+) -> Result<Resolved, String> {
+    let Some(spec) = at else {
+        let anchors = paths
+            .iter()
+            .map(|_| Anchor {
+                rev: "HEAD".to_string(),
+                is_head: true,
+            })
+            .collect();
+        return Ok((paths.to_vec(), labels.to_vec(), anchors, None));
+    };
+    let multi = paths.len() > 1;
+
+    // Reduce the spec to: an optional exact pin (one repo, one sha) + a `--before`
+    // expression that snaps every other repo to the same moment.
+    let mut pin: Option<(usize, String)> = None;
+    let mut before: Option<String> = None;
+    let mut note: Option<String> = None;
+
+    if let Some((pre, rev)) = spec.split_once('@') {
+        if let Some(idx) = labels.iter().position(|l| l == pre) {
+            let sha = resolve_rev_or_date(&paths[idx], rev)?;
+            let ts = git::commit_ts(&paths[idx], &sha)?;
+            let date = git::commit_date(&paths[idx], &sha).unwrap_or_default();
+            note = Some(format!("@{pre} {} ({date})", &sha[..sha.len().min(8)]));
+            pin = Some((idx, sha));
+            before = Some(format!("@{ts}"));
+        }
+    }
+
+    if pin.is_none() && before.is_none() {
+        if multi {
+            if !looks_like_date(spec) {
+                let example = labels.first().map(String::as_str).unwrap_or("repo");
+                return Err(format!(
+                    "with several repos, anchor to one repo's commit (e.g. `{example}@{spec}`) \
+                     or give a date — a bare revision is ambiguous across repos"
+                ));
+            }
+            note = Some(format!("as of {spec}"));
+            before = Some(spec.to_string());
+        } else {
+            let sha = resolve_rev_or_date(&paths[0], spec)?;
+            let dated = git::resolve_rev(&paths[0], spec).is_err() && looks_like_date(spec);
+            note = Some(if dated {
+                format!("as of {spec} ({})", &sha[..sha.len().min(8)])
+            } else {
+                let date = git::commit_date(&paths[0], &sha).unwrap_or_default();
+                format!("@{} ({date})", &sha[..sha.len().min(8)])
+            });
+            pin = Some((0, sha));
+        }
+    }
+
+    // Materialize per-repo anchors, dropping repos with no history that old.
+    let mut out_paths = Vec::new();
+    let mut out_labels = Vec::new();
+    let mut anchors = Vec::new();
+    for (i, (p, l)) in paths.iter().zip(labels).enumerate() {
+        let sha = match &pin {
+            Some((pidx, psha)) if *pidx == i => Some(psha.clone()),
+            _ => match &before {
+                Some(b) => git::snap_before(p, b).map_err(|e| format!("{p}: {e}"))?,
+                None => None,
+            },
+        };
+        let Some(sha) = sha else {
+            eprintln!("tv: {l}: no commit on/before the anchor — skipping");
+            continue;
+        };
+        let is_head = git::head_sha(p).map(|h| h == sha).unwrap_or(false);
+        anchors.push(Anchor { rev: sha, is_head });
+        out_paths.push(p.clone());
+        out_labels.push(l.clone());
+    }
+    if anchors.is_empty() {
+        return Err("no repo has any commit on/before the anchor".to_string());
+    }
+    Ok((out_paths, out_labels, anchors, note))
+}
+
 fn parse_args() -> Result<Config, String> {
     let mut repos: Vec<String> = Vec::new();
     let mut command = Command::Status;
@@ -134,6 +296,7 @@ fn parse_args() -> Result<Config, String> {
     let mut color_off = false;
     let mut all_time = false;
     let mut me = false;
+    let mut at: Option<String> = None;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -149,6 +312,7 @@ fn parse_args() -> Result<Config, String> {
             "--no-color" => color_off = true,
             "--all" => all_time = true,
             "--me" => me = true,
+            "--at" => at = Some(it.next().ok_or("--at requires a commit, ref, or date")?),
             "--repo" => repos.push(it.next().ok_or("--repo requires a path")?),
             "status" => command = Command::Status,
             "thrash" => command = Command::Thrash,
@@ -169,6 +333,7 @@ fn parse_args() -> Result<Config, String> {
         color_off,
         all_time,
         me,
+        at,
     })
 }
 
@@ -178,7 +343,7 @@ fn print_help() {
 terminal velocity (tv) — is your build's speed real throughput, or just thrashing?
 
 USAGE:
-    tv [COMMAND] [--repo <path>]... [--report]
+    tv [COMMAND] [--repo <path>]... [--at <point>] [--me] [--report]
 
 COMMANDS:
     status      one-screen build-flow cockpit (default)
@@ -196,6 +361,14 @@ OPTIONS:
     --all           thrash/hotspots over all history (default: last 8 weeks)
     --me            only my own commits (from git config); my rework + how long
                     the code I write survives. Self only — no per-teammate view.
+    --at <point>    rewind the as-of point for archaeology / period comparison
+                    (default: HEAD). A single repo takes a rev or date:
+                      --at v1.2.0   --at HEAD~50   --at 2026-03-01   --at \"3 weeks ago\"
+                    Across several repos the anchor is one shared moment in time:
+                    name one repo's commit and the rest snap to that timestamp —
+                      --at myrepo@a1b2c3d        (or just a date: --at 2026-03-01)
+                    A bare revision is rejected for multi-repo (a sha lives in
+                    one repo). Compare two periods by running --at twice.
     -h, --help      show this help
     -V, --version   show version
 "
@@ -203,17 +376,21 @@ OPTIONS:
 }
 
 /// Per-repo (label, change-frequency, complexity) — the hotspots inputs.
-/// `authors` (non-empty under `--me`) restricts the change counts to my commits.
+/// `anchors` cap each repo's history at its `--at` point; `authors` (non-empty
+/// under `--me`) restricts the change counts to my commits.
 fn repo_files(
     repos: &[String],
     labels: &[String],
+    anchors: &[Anchor],
     since: Option<i64>,
     authors: &[String],
 ) -> Result<Vec<metrics::RepoFiles>, String> {
     let mut out = Vec::new();
-    for (repo, label) in repos.iter().zip(labels) {
-        let f = git::file_change_freq(repo, since, authors).map_err(|e| format!("{repo}: {e}"))?;
-        let c = git::file_complexity(repo).map_err(|e| format!("{repo}: {e}"))?;
+    for ((repo, label), a) in repos.iter().zip(labels).zip(anchors) {
+        let f = git::file_change_freq(repo, &a.rev, since, authors)
+            .map_err(|e| format!("{repo}: {e}"))?;
+        let c =
+            git::file_complexity(repo, &a.rev, a.is_head).map_err(|e| format!("{repo}: {e}"))?;
         out.push((label.clone(), f, c));
     }
     Ok(out)
@@ -223,12 +400,14 @@ fn repo_files(
 fn repo_churn(
     repos: &[String],
     labels: &[String],
+    anchors: &[Anchor],
     since: Option<i64>,
     authors: &[String],
 ) -> Result<Vec<metrics::RepoChurn>, String> {
     let mut out = Vec::new();
-    for (repo, label) in repos.iter().zip(labels) {
-        let c = git::file_churn_totals(repo, since, authors).map_err(|e| format!("{repo}: {e}"))?;
+    for ((repo, label), a) in repos.iter().zip(labels).zip(anchors) {
+        let c = git::file_churn_totals(repo, &a.rev, since, authors)
+            .map_err(|e| format!("{repo}: {e}"))?;
         out.push((label.clone(), c));
     }
     Ok(out)
@@ -236,15 +415,26 @@ fn repo_churn(
 
 fn run(cfg: Config) -> Result<(), String> {
     let palette = style::Palette::detect(cfg.color_off);
-    let multi = cfg.repos.len() > 1;
-    let labels = repo_labels(&cfg.repos);
+
+    // Explain is pure prose — no repos, no anchor resolution.
+    if let Command::Explain = cfg.command {
+        render::print_explain(&palette);
+        return Ok(());
+    }
+
+    // Resolve the `--at` anchor first: it can rewind, and even drop, repos. Every
+    // pass below keys off these per-repo anchors instead of an implicit HEAD.
+    let base_labels = repo_labels(&cfg.repos);
+    let (paths, labels, anchors, anchor_note) =
+        resolve_anchors(&cfg.repos, &base_labels, cfg.at.as_deref())?;
+    let multi = paths.len() > 1;
     // `report` command and the `--report` flag are the same thing: the full page.
     let want_report = cfg.report || matches!(cfg.command, Command::Report);
 
     // `--me`: resolve my identity from git config (self-instrumentation only).
     let me: Option<model::Me> = if cfg.me {
         Some(
-            cfg.repos
+            paths
                 .iter()
                 .find_map(|r| git::whoami(r))
                 .ok_or("--me needs your identity — set `git config user.email`")?,
@@ -258,12 +448,14 @@ fn run(cfg: Config) -> Result<(), String> {
         .map(|m| vec![m.email.clone(), m.name.clone()])
         .unwrap_or_default();
     let header = {
-        let s = scope_label(&cfg.repos);
-        if me.is_some() {
-            format!("{s} · me")
-        } else {
-            s
+        let mut s = scope_label(&paths);
+        if let Some(n) = &anchor_note {
+            s = format!("{s} · {n}");
         }
+        if me.is_some() {
+            s = format!("{s} · me");
+        }
+        s
     };
     let keep_mine = |commits: &mut Vec<model::Commit>| {
         if let Some(m) = &me {
@@ -278,19 +470,15 @@ fn run(cfg: Config) -> Result<(), String> {
     };
 
     match cfg.command {
-        Command::Explain => {
-            render::print_explain(&palette);
-            return Ok(());
-        }
         // Hotspots to the terminal needs no blame pass; the report does, so it
         // falls through to the full pipeline below.
         Command::Hotspots if !want_report => {
             let since = if cfg.all_time {
                 None
             } else {
-                Some(latest_ts_across(&cfg.repos)? - WINDOW_SECS)
+                Some(latest_ts_across(&paths, &anchors)? - WINDOW_SECS)
             };
-            let per_repo = repo_files(&cfg.repos, &labels, since, &author_pats)?;
+            let per_repo = repo_files(&paths, &labels, &anchors, since, &author_pats)?;
             let rows = metrics::hotspots(&per_repo, 12);
             render::print_hotspots(&rows, since.is_some(), multi, &palette);
             return Ok(());
@@ -298,8 +486,9 @@ fn run(cfg: Config) -> Result<(), String> {
         // Cadence is a commit-time punchcard — commits only, no blame pass.
         Command::Cadence if !want_report => {
             let mut commits: Vec<model::Commit> = Vec::new();
-            for repo in &cfg.repos {
-                commits.extend(git::load_commits(repo).map_err(|e| format!("{repo}: {e}"))?);
+            for (repo, a) in paths.iter().zip(&anchors) {
+                commits
+                    .extend(git::load_commits(repo, &a.rev).map_err(|e| format!("{repo}: {e}"))?);
             }
             keep_mine(&mut commits);
             if commits.is_empty() {
@@ -315,14 +504,14 @@ fn run(cfg: Config) -> Result<(), String> {
     // Status / Thrash / Report all need the per-repo survival collections (S is
     // fit per-repo — repo frailty differs — and output is attributed by repo).
     let mut commits: Vec<model::Commit> = Vec::new();
-    let mut repos: Vec<(String, git::Collection)> = Vec::new();
-    for (repo, label) in cfg.repos.iter().zip(&labels) {
-        let cs = git::load_commits(repo).map_err(|e| format!("{repo}: {e}"))?;
+    let mut cols: Vec<(String, git::Collection)> = Vec::new();
+    for ((repo, label), a) in paths.iter().zip(&labels).zip(&anchors) {
+        let cs = git::load_commits(repo, &a.rev).map_err(|e| format!("{repo}: {e}"))?;
         if cs.is_empty() {
             continue; // an empty repo in a multi-repo set just contributes nothing
         }
-        let col = git::collect_cached(repo, &cs).map_err(|e| format!("{repo}: {e}"))?;
-        repos.push((label.clone(), col));
+        let col = git::collect_cached(repo, &cs, &a.rev).map_err(|e| format!("{repo}: {e}"))?;
+        cols.push((label.clone(), col));
         commits.extend(cs);
     }
     keep_mine(&mut commits); // activity metrics + churn denominator are my commits
@@ -330,18 +519,20 @@ fn run(cfg: Config) -> Result<(), String> {
         return Err(empty_err());
     }
 
-    let anchor = commits.iter().map(|c| c.ts).max().unwrap_or(0);
+    // The window trails the anchor moment (the newest loaded commit), not now.
+    let anchor_ts = commits.iter().map(|c| c.ts).max().unwrap_or(0);
     let (since, recent_cut) = if cfg.all_time {
         (None, None)
     } else {
-        (Some(anchor - WINDOW_SECS), Some(anchor - 7 * 86_400))
+        (Some(anchor_ts - WINDOW_SECS), Some(anchor_ts - 7 * 86_400))
     };
 
     if want_report {
-        let cockpit = metrics::build_cockpit(&commits, &repos, &header, me.as_ref());
-        let churn = repo_churn(&cfg.repos, &labels, since, &author_pats)?;
-        let tree = metrics::thrash_tree(&repos, &churn, since, recent_cut, multi, me.as_ref());
-        let rows = metrics::hotspots(&repo_files(&cfg.repos, &labels, since, &author_pats)?, 12);
+        let cockpit = metrics::build_cockpit(&commits, &cols, &header, me.as_ref());
+        let churn = repo_churn(&paths, &labels, &anchors, since, &author_pats)?;
+        let tree = metrics::thrash_tree(&cols, &churn, since, recent_cut, multi, me.as_ref());
+        let files = repo_files(&paths, &labels, &anchors, since, &author_pats)?;
+        let rows = metrics::hotspots(&files, 12);
         let heat = metrics::cadence_heatmap(&commits);
         let path = "tv-report.html";
         render::write_report(&cockpit, &tree, &rows, &heat, since.is_some(), multi, path)?;
@@ -351,12 +542,12 @@ fn run(cfg: Config) -> Result<(), String> {
 
     match cfg.command {
         Command::Status => {
-            let cockpit = metrics::build_cockpit(&commits, &repos, &header, me.as_ref());
+            let cockpit = metrics::build_cockpit(&commits, &cols, &header, me.as_ref());
             render::print_cockpit(&cockpit, &palette);
         }
         Command::Thrash => {
-            let churn = repo_churn(&cfg.repos, &labels, since, &author_pats)?;
-            let tree = metrics::thrash_tree(&repos, &churn, since, recent_cut, multi, me.as_ref());
+            let churn = repo_churn(&paths, &labels, &anchors, since, &author_pats)?;
+            let tree = metrics::thrash_tree(&cols, &churn, since, recent_cut, multi, me.as_ref());
             render::print_thrash(&header, &tree, since.is_some(), &palette);
         }
         _ => unreachable!(),

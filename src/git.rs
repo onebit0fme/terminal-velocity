@@ -4,7 +4,8 @@
 //!   - `load_commits` — fast, one `git log --numstat`; powers batch/cadence/net.
 //!   - `collect_cached` — the blame-at-death pass for survival-weighted
 //!     flow/thrash/excision. Slow on first run (per-line blame), so it's cached
-//!     keyed by HEAD sha and runs automatically — no flag, no separate command.
+//!     keyed by the anchor sha (HEAD by default, or the `--at` commit) and runs
+//!     automatically — no flag, no separate command.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -45,8 +46,57 @@ pub fn current_branch(repo: &str) -> Result<String, String> {
         .to_string())
 }
 
-/// All non-merge commits with per-file numstat, newest first. Fast.
-pub fn load_commits(repo: &str) -> Result<Vec<Commit>, String> {
+// --- anchor primitives (`--at`): resolve a rev/date to a concrete commit -------
+
+/// The current HEAD commit sha.
+pub fn head_sha(repo: &str) -> Result<String, String> {
+    Ok(git(repo, &["rev-parse", "HEAD"])?.trim().to_string())
+}
+
+/// Resolve a revision (`sha`, tag, branch, `HEAD~5`, …) to a commit sha, or `Err`
+/// if it isn't a commit in this repo. `--quiet` makes the failure a non-zero exit.
+pub fn resolve_rev(repo: &str, rev: &str) -> Result<String, String> {
+    let spec = format!("{rev}^{{commit}}");
+    let out = git(repo, &["rev-parse", "--verify", "--quiet", &spec])?;
+    let sha = out.trim();
+    if sha.is_empty() {
+        Err(format!("`{rev}` is not a commit in this repo"))
+    } else {
+        Ok(sha.to_string())
+    }
+}
+
+/// Committer timestamp (unix) of a rev.
+pub fn commit_ts(repo: &str, rev: &str) -> Result<i64, String> {
+    git(repo, &["show", "-s", "--format=%ct", rev])?
+        .trim()
+        .parse()
+        .map_err(|_| format!("no commit timestamp for `{rev}`"))
+}
+
+/// Short committer date (YYYY-MM-DD) of a rev, for display.
+pub fn commit_date(repo: &str, rev: &str) -> Result<String, String> {
+    Ok(git(repo, &["show", "-s", "--format=%cs", rev])?
+        .trim()
+        .to_string())
+}
+
+/// Newest first-parent commit on/before a date expression (`2026-03-01`,
+/// `@1700000000`, `3 weeks ago`, …). `None` if the repo has nothing that old.
+pub fn snap_before(repo: &str, before: &str) -> Result<Option<String>, String> {
+    let arg = format!("--before={before}");
+    let out = git(repo, &["rev-list", "-1", "--first-parent", &arg, "HEAD"])?;
+    let sha = out.trim();
+    Ok(if sha.is_empty() {
+        None
+    } else {
+        Some(sha.to_string())
+    })
+}
+
+/// All non-merge commits reachable from `anchor` (a rev — `"HEAD"` or a sha) with
+/// per-file numstat, newest first. Fast. The anchor is how `--at` rewinds history.
+pub fn load_commits(repo: &str, anchor: &str) -> Result<Vec<Commit>, String> {
     let fmt = format!("--pretty=format:{REC}%H{FLD}%ct{FLD}%ae{FLD}%an{FLD}%s");
     let out = git(
         repo,
@@ -56,6 +106,7 @@ pub fn load_commits(repo: &str) -> Result<Vec<Commit>, String> {
             "--date-order",
             "--numstat",
             fmt.as_str(),
+            anchor,
         ],
     )?;
 
@@ -282,25 +333,34 @@ fn blame_at(repo: &str, rev: &str, path: &str) -> HashMap<i64, (String, i64)> {
     result
 }
 
-/// sha -> topological index over all commits, plus HEAD index and HEAD ts.
-fn commit_index(repo: &str) -> Result<(HashMap<String, i64>, i64, i64), String> {
-    let out = git(repo, &["rev-list", "--reverse", "--topo-order", "HEAD"])?;
+/// sha -> topological index over commits reachable from `anchor`, plus the
+/// anchor's own index (the censoring point) and its committer ts.
+fn commit_index(repo: &str, anchor: &str) -> Result<(HashMap<String, i64>, i64, i64), String> {
+    let out = git(repo, &["rev-list", "--reverse", "--topo-order", anchor])?;
     let mut map = HashMap::new();
     let mut i = 0_i64;
     for sha in out.split_whitespace() {
         map.insert(sha.to_string(), i);
         i += 1;
     }
-    let head_ts: i64 = git(repo, &["show", "-s", "--format=%ct", "HEAD"])?
+    let anchor_ts: i64 = git(repo, &["show", "-s", "--format=%ct", anchor])?
         .trim()
         .parse()
-        .map_err(|_| "could not read HEAD timestamp".to_string())?;
-    Ok((map, i - 1, head_ts))
+        .map_err(|_| "could not read anchor timestamp".to_string())?;
+    Ok((map, i - 1, anchor_ts))
 }
 
-fn collect(repo: &str, commits: &[Commit], head: &str) -> Result<Collection, String> {
-    eprintln!("tv: analyzing build history (first run for this HEAD — caching for next time)…");
-    let (index, head_idx, head_ts) = commit_index(repo)?;
+/// `anchor` is the as-of rev (`"HEAD"` or a sha); `head_sha` is its resolved sha,
+/// stored as the cache key. Survivors are the lines alive *at the anchor*, blamed
+/// against the anchor's tree — so `--at` rewinds the censoring point cleanly.
+fn collect(
+    repo: &str,
+    commits: &[Commit],
+    anchor: &str,
+    head_sha: &str,
+) -> Result<Collection, String> {
+    eprintln!("tv: analyzing build history (first run for this anchor — caching for next time)…");
+    let (index, head_idx, head_ts) = commit_index(repo, anchor)?;
     let total = commits.len();
 
     // Author table: intern commit authors so deaths/survivors can be attributed
@@ -363,7 +423,7 @@ fn collect(repo: &str, commits: &[Commit], head: &str) -> Result<Collection, Str
     }
     eprintln!("\r  deaths {total}/{total}   ");
 
-    let files = git(repo, &["ls-files"])?;
+    let files = git(repo, &["ls-tree", "-r", "--name-only", anchor])?;
     let flist: Vec<&str> = files
         .lines()
         .filter(|p| !p.is_empty() && !is_binary(p))
@@ -377,7 +437,7 @@ fn collect(repo: &str, commits: &[Commit], head: &str) -> Result<Collection, Str
             eprint!("\r  survivors {k}/{ftotal}");
             let _ = std::io::stderr().flush();
         }
-        for (_ln, (isha, its)) in blame_at(repo, "HEAD", path) {
+        for (_ln, (isha, its)) in blame_at(repo, anchor, path) {
             if let Some(&iidx) = index.get(&isha) {
                 cens_c.push((head_idx - iidx) as f64);
                 cens_t.push((head_ts - its) as f64 / 86400.0);
@@ -388,7 +448,7 @@ fn collect(repo: &str, commits: &[Commit], head: &str) -> Result<Collection, Str
     eprintln!("\r  survivors {ftotal}/{ftotal}   ");
 
     Ok(Collection {
-        head: head.to_string(),
+        head: head_sha.to_string(),
         deaths,
         cens_c,
         cens_t,
@@ -397,32 +457,40 @@ fn collect(repo: &str, commits: &[Commit], head: &str) -> Result<Collection, Str
     })
 }
 
-/// Run the blame-at-death pass, reusing a HEAD-keyed cache when valid.
-/// Auto-runs — there is no separate command or flag.
-pub fn collect_cached(repo: &str, commits: &[Commit]) -> Result<Collection, String> {
-    let head = git(repo, &["rev-parse", "HEAD"])?.trim().to_string();
-    let cache = cache_file(repo);
+/// Run the blame-at-death pass, reusing an anchor-keyed cache when valid. Auto-runs
+/// — no separate command or flag. `anchor` is the as-of rev (`"HEAD"` or a sha); the
+/// default HEAD run keeps the plain `tv-cache`, a pinned `--at` gets its own file so
+/// archaeology never clobbers the everyday cache.
+pub fn collect_cached(repo: &str, commits: &[Commit], anchor: &str) -> Result<Collection, String> {
+    let key = git(repo, &["rev-parse", anchor])?.trim().to_string();
+    let is_head = head_sha(repo).map(|h| h == key).unwrap_or(false);
+    let cache = cache_file(repo, &key, is_head);
     if let Some(path) = &cache {
-        if let Some(col) = load_cache(path, &head) {
+        if let Some(col) = load_cache(path, &key) {
             return Ok(col);
         }
     }
-    let col = collect(repo, commits, &head)?;
+    let col = collect(repo, commits, anchor, &key)?;
     if let Some(path) = &cache {
         let _ = save_cache(path, &col); // best-effort; a cache miss just recomputes
     }
     Ok(col)
 }
 
-fn cache_file(repo: &str) -> Option<PathBuf> {
+fn cache_file(repo: &str, key: &str, is_head: bool) -> Option<PathBuf> {
     let gd = git(repo, &["rev-parse", "--absolute-git-dir"]).ok()?;
-    Some(Path::new(gd.trim()).join("tv-cache"))
+    let name = if is_head {
+        "tv-cache".to_string()
+    } else {
+        format!("tv-cache-{}", &key[..key.len().min(12)])
+    };
+    Some(Path::new(gd.trim()).join(name))
 }
 
 fn load_cache(path: &Path, head: &str) -> Option<Collection> {
     let data = std::fs::read_to_string(path).ok()?;
     let mut lines = data.lines();
-    let cached_head = lines.next()?.strip_prefix("TVCACHE3 ")?;
+    let cached_head = lines.next()?.strip_prefix("TVCACHE4 ")?;
     if cached_head != head {
         return None;
     }
@@ -463,7 +531,7 @@ fn load_cache(path: &Path, head: &str) -> Option<Collection> {
 }
 
 fn save_cache(path: &Path, col: &Collection) -> std::io::Result<()> {
-    let mut s = format!("TVCACHE3 {}\n", col.head);
+    let mut s = format!("TVCACHE4 {}\n", col.head);
     for (email, name) in &col.authors {
         s.push_str(&format!("A\t{email}\t{name}\n"));
     }
@@ -477,14 +545,6 @@ fn save_cache(path: &Path, col: &Collection) -> std::io::Result<()> {
         s.push_str(&format!("C\t{c}\t{t}\t{a}\n"));
     }
     std::fs::write(path, s)
-}
-
-/// Committer timestamp of the latest commit (the window anchor).
-pub fn latest_ts(repo: &str) -> Result<i64, String> {
-    git(repo, &["log", "-1", "--format=%ct"])?
-        .trim()
-        .parse()
-        .map_err(|_| "no commits".to_string())
 }
 
 /// git regex metachar escape, so an email/name `--author` pattern matches literally.
@@ -508,11 +568,12 @@ fn author_args(authors: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Churn (added+deleted) per path. `since` (unix ts) windows it to recent
-/// commits; None = all history. `authors` (if non-empty) restricts to those
-/// commit authors (`--me`).
+/// Churn (added+deleted) per path. `anchor` (`"HEAD"` or a sha) caps history at
+/// the `--at` point; `since` (unix ts) windows it to recent commits, None = all
+/// history. `authors` (if non-empty) restricts to those commit authors (`--me`).
 pub fn file_churn_totals(
     repo: &str,
+    anchor: &str,
     since: Option<i64>,
     authors: &[String],
 ) -> Result<HashMap<String, i64>, String> {
@@ -526,6 +587,7 @@ pub fn file_churn_totals(
         args.push(format!("--since=@{ts}"));
     }
     args.extend(author_args(authors));
+    args.push(anchor.to_string());
     let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = git(repo, &argrefs)?;
     let mut m: HashMap<String, i64> = HashMap::new();
@@ -549,9 +611,11 @@ pub fn file_churn_totals(
 
 /// Change frequency: how many (windowed) commits touched each path. The standard
 /// hotspot "change" axis — "edited often" — far less size-skewed than line churn.
-/// `authors` (if non-empty) restricts to those commit authors (`--me`).
+/// `anchor` caps history at the `--at` point; `authors` (if non-empty) restricts
+/// to those commit authors (`--me`).
 pub fn file_change_freq(
     repo: &str,
+    anchor: &str,
     since: Option<i64>,
     authors: &[String],
 ) -> Result<HashMap<String, i64>, String> {
@@ -565,6 +629,7 @@ pub fn file_change_freq(
         args.push(format!("--since=@{ts}"));
     }
     args.extend(author_args(authors));
+    args.push(anchor.to_string());
     let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = git(repo, &argrefs)?;
     let mut m: HashMap<String, i64> = HashMap::new();
@@ -577,20 +642,40 @@ pub fn file_change_freq(
     Ok(m)
 }
 
-/// Indentation complexity per current text file: each non-blank line contributes
-/// its nesting depth + 1. A cheap, language-agnostic complexity proxy (beats raw
-/// line count — it captures nesting, and flat files like markdown score low).
-pub fn file_complexity(repo: &str) -> Result<HashMap<String, i64>, String> {
-    let files = git(repo, &["ls-files"])?;
+/// Indentation complexity per text file: each non-blank line contributes its
+/// nesting depth + 1. A cheap, language-agnostic complexity proxy (beats raw line
+/// count — it captures nesting, and flat files like markdown score low). At HEAD
+/// (`is_head`) it reads the working tree (fast); pinned to a past `anchor` it reads
+/// that commit's tree via `git show`, so a file that vanished before HEAD still
+/// scores from its then-contents instead of dropping out of the ranking.
+pub fn file_complexity(
+    repo: &str,
+    anchor: &str,
+    is_head: bool,
+) -> Result<HashMap<String, i64>, String> {
     let mut m = HashMap::new();
-    for path in files.lines() {
-        if path.is_empty() || is_binary(path) || is_noncode(path) {
-            continue;
+    if is_head {
+        let files = git(repo, &["ls-files"])?;
+        for path in files.lines() {
+            if path.is_empty() || is_binary(path) || is_noncode(path) {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(Path::new(repo).join(path)) else {
+                continue;
+            };
+            m.insert(path.to_string(), indent_complexity(&content));
         }
-        let Ok(content) = std::fs::read_to_string(Path::new(repo).join(path)) else {
-            continue;
-        };
-        m.insert(path.to_string(), indent_complexity(&content));
+    } else {
+        let files = git(repo, &["ls-tree", "-r", "--name-only", anchor])?;
+        for path in files.lines() {
+            if path.is_empty() || is_binary(path) || is_noncode(path) {
+                continue;
+            }
+            let Ok(content) = git(repo, &["show", &format!("{anchor}:{path}")]) else {
+                continue;
+            };
+            m.insert(path.to_string(), indent_complexity(&content));
+        }
     }
     Ok(m)
 }

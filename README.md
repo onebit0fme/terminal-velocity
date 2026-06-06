@@ -113,6 +113,7 @@ cargo build --release          # zero dependencies; builds offline
 ./target/release/tv --repo /path/to/repo
 ./target/release/tv thrash     # or: hotspots, cadence, explain
 ./target/release/tv status --me  # only my commits: my rework + how long my code lasts
+./target/release/tv status --at 2026-03-01  # rewind: build flow as of a past date/commit
 ./target/release/tv report     # all three -> one HTML page (tv-report.html)
 cargo test                     # survival-curve unit tests
 ```
@@ -140,6 +141,22 @@ scripts/scan-repos.sh ~/code            # aggregated status
 scripts/scan-repos.sh ~/code thrash     # any tv subcommand/flags
 TV_DRY=1 scripts/scan-repos.sh ~/code   # just list the selection
 mise run scan -- ~/code thrash          # same, builds release first
+```
+
+**Archaeology & period comparison.** `--at <point>` rewinds the as-of point from
+HEAD to a past commit or date: survival `S(age)` is recomputed against *that*
+tree, the trailing window ends at *that* moment (not now), and the blame cache is
+keyed separately so archaeology never clobbers your everyday HEAD cache. A single
+repo takes a rev or a date directly. Across several repos the anchor is **one
+shared moment in time** — name one repo's commit and the rest snap to its
+timestamp (a bare sha is rejected: it exists in only one of them). Compare two
+periods by running `--at` twice and reading the cockpits side by side.
+
+```sh
+./target/release/tv status --at HEAD~200                       # as of 200 commits back
+./target/release/tv status --at v1.2.0                         # as of a tag
+./target/release/tv status --repo . --at "3 weeks ago"         # as of a relative date
+./target/release/tv thrash --repo ../a --repo ../b --at a@v1.0 # pin repo a; b snaps to a's time
 ```
 
 ## Architecture
