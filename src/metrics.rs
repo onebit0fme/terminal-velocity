@@ -3,9 +3,9 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::git::Collection;
-use crate::model::{Card, Cockpit, Commit, Tone};
+use crate::model::{Card, Cockpit, Commit, RepoSurvival, Tone};
 use crate::spark::{median, percentile_rank, sparkline};
-use crate::survival::{half_life, km_survival, survival_at};
+use crate::survival::{half_life, km_survival, sample_survival, survival_at};
 use crate::verdict::{self, Signals};
 
 const DAY: i64 = 86_400;
@@ -94,9 +94,8 @@ pub fn build_cockpit(commits: &[Commit], repos: &[(String, Collection)], branch:
     let mut exc_tot = 0.0;
     let mut thr_wk: BTreeMap<i64, f64> = BTreeMap::new();
     let mut exc_wk: BTreeMap<i64, f64> = BTreeMap::new();
-    let mut hl_c: Vec<Option<f64>> = Vec::new();
-    let mut hl_d: Vec<Option<f64>> = Vec::new();
-    for (_label, col) in repos {
+    let mut survival: Vec<RepoSurvival> = Vec::new();
+    for (label, col) in repos {
         let ev_c: Vec<f64> = col.deaths.iter().map(|d| d.age_c).collect();
         let ev_t: Vec<f64> = col.deaths.iter().map(|d| d.age_t).collect();
         let (tc, sc) = km_survival(&ev_c, &col.cens_c);
@@ -109,8 +108,19 @@ pub fn build_cockpit(commits: &[Commit], repos: &[(String, Collection)], branch:
             *thr_wk.entry(wk).or_default() += w * d.rw;
             *exc_wk.entry(wk).or_default() += w * (1.0 - d.rw);
         }
-        hl_c.push(half_life(&tc, &sc));
-        hl_d.push(half_life(&tt, &st));
+        let max_age = ev_c.iter().copied().fold(0.0_f64, f64::max);
+        let alive = col.cens_c.len() as f64;
+        let total = alive + col.deaths.len() as f64;
+        survival.push(RepoSurvival {
+            label: label.clone(),
+            curve: sample_survival(&tc, &sc, 24, max_age),
+            half_life: half_life_str(half_life(&tc, &sc), half_life(&tt, &st)),
+            alive_pct: if total > 0.0 {
+                alive / total * 100.0
+            } else {
+                0.0
+            },
+        });
     }
     let thr_pct = thr_tot / total_churn * 100.0;
     let exc_pct = exc_tot / total_churn * 100.0;
@@ -144,54 +154,30 @@ pub fn build_cockpit(commits: &[Commit], repos: &[(String, Collection)], branch:
     };
     let verdict = verdict::compose(&sig);
 
-    let hl = format_half_life(&hl_c, &hl_d, repos.len());
     let footer = format!(
-        "code half-life {hl} (how long a typical line survives) · net {net:+} \
-         ({added} added, {deleted} deleted) · run `tv thrash` / `tv hotspots` to drill in"
+        "net {net:+} ({added} added, {deleted} deleted) · \
+         run `tv thrash` / `tv hotspots` to drill in"
     );
 
     Cockpit {
         branch: branch.to_string(),
         window: "last 7d vs trailing 8wk".to_string(),
         verdict,
+        survival,
         cards,
         footer,
         coverage_weeks,
     }
 }
 
-/// Half-life string. One repo: the bare figure. Several: the median across
-/// their per-repo curves (so it's not a misleading pooled number), with a count
-/// of how many actually reached 50%.
-fn format_half_life(hl_c: &[Option<f64>], hl_d: &[Option<f64>], n: usize) -> String {
-    if n <= 1 {
-        let c = hl_c.first().copied().flatten();
-        let d = hl_d.first().copied().flatten();
-        return match (c, d) {
-            (Some(c), Some(d)) => format!("~{c:.0} commits / ~{d:.0} days"),
-            (Some(c), None) => format!("~{c:.0} commits"),
-            (None, Some(d)) => format!("~{d:.0} days"),
-            (None, None) => "not reached (>50% of lines still alive)".to_string(),
-        };
+/// Compact half-life (commit clock / wall clock) for a survival row.
+fn half_life_str(c: Option<f64>, d: Option<f64>) -> String {
+    match (c, d) {
+        (Some(c), Some(d)) => format!("~{c:.0}c / ~{d:.0}d"),
+        (Some(c), None) => format!("~{c:.0}c"),
+        (None, Some(d)) => format!("~{d:.0}d"),
+        (None, None) => "not reached".to_string(),
     }
-    let reached = hl_c.iter().filter(|x| x.is_some()).count();
-    let tail = format!("(median of {reached}/{n} repos)");
-    match (median_opt(hl_c), median_opt(hl_d)) {
-        (Some(c), Some(d)) => format!("~{c:.0} commits / ~{d:.0} days {tail}"),
-        (Some(c), None) => format!("~{c:.0} commits {tail}"),
-        (None, Some(d)) => format!("~{d:.0} days {tail}"),
-        (None, None) => format!("not reached in any of {n} repos (>50% of lines still alive)"),
-    }
-}
-
-/// Median of the present values, ignoring `None`.
-fn median_opt(vals: &[Option<f64>]) -> Option<f64> {
-    let mut v: Vec<f64> = vals.iter().filter_map(|x| *x).collect();
-    if v.is_empty() {
-        return None;
-    }
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    Some(v[v.len() / 2])
 }
 
 /// Weekly throughput (total churn/week) — a steadiness pulse, self-relative.

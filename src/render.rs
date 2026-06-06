@@ -5,7 +5,8 @@
 use std::fs;
 
 use crate::metrics::{Hotspot, TreeNode};
-use crate::model::{Card, Cockpit, Tone};
+use crate::model::{Card, Cockpit, RepoSurvival, Tone};
+use crate::spark::sparkline;
 use crate::style::Palette;
 
 const WIDTH: usize = 60;
@@ -56,6 +57,11 @@ pub fn print_cockpit(c: &Cockpit, p: &Palette) {
     }
     println!("{dim_rule}");
 
+    if !c.survival.is_empty() {
+        print_survival(&c.survival, p);
+        println!("{dim_rule}");
+    }
+
     for card in &c.cards {
         print_card(card, p);
     }
@@ -76,6 +82,59 @@ fn print_card(card: &Card, p: &Palette) {
     }
     if let Some(note) = &card.note {
         println!("{}", p.dim(&format!("             └ {note}")));
+    }
+}
+
+/// The survival curve(s) — S(age) — that weight every thrash/excision, surfaced
+/// right under the verdict. One repo: curve + half-life + alive%, with a one-line
+/// gloss. Several: one compact row per repo (S is fit per repo).
+fn print_survival(survivals: &[RepoSurvival], p: &Palette) {
+    // Downsample to a tidy 16-char sparkline (the stored curve is finer for HTML).
+    let spark = |c: &[f64]| -> String {
+        if c.len() < 2 {
+            return "—".to_string();
+        }
+        if c.len() <= 16 {
+            return sparkline(c);
+        }
+        let step = c.len() as f64 / 16.0;
+        let ds: Vec<f64> = (0..16)
+            .map(|i| c[((i as f64 * step) as usize).min(c.len() - 1)])
+            .collect();
+        sparkline(&ds)
+    };
+
+    if survivals.len() == 1 {
+        let s = &survivals[0];
+        println!(
+            "{}  {}  half-life {} · {}",
+            p.bold("code survival"),
+            spark(&s.curve),
+            p.bold(&s.half_life),
+            p.dim(&format!("{:.0}% of lines still alive", s.alive_pct)),
+        );
+        for line in wrap(
+            "S(age) = a deleted line's odds of having lived this long; \
+             thrash and excision weight every death by it.",
+            WIDTH - 2,
+        ) {
+            println!("{}", p.dim(&format!("  {line}")));
+        }
+    } else {
+        println!(
+            "{} {}",
+            p.bold("code survival"),
+            p.dim("· S(age) weights every thrash & excision · fit per repo")
+        );
+        for s in survivals {
+            println!(
+                "  {} {}  {} · {}",
+                p.bold(&trunc(&s.label, 16)),
+                spark(&s.curve),
+                p.dim(&s.half_life),
+                p.dim(&format!("{:.0}% alive", s.alive_pct)),
+            );
+        }
     }
 }
 
@@ -412,7 +471,14 @@ footer{margin-top:1.6rem;border-top:1px solid var(--line);padding-top:1rem;color
 .hrow{display:flex;align-items:center;gap:.6rem;padding:.18rem 0;font-size:.88rem;font-variant-numeric:tabular-nums}\
 .hfile{flex:1 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;\
 font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.82rem}\
-.hmeta{color:var(--muted);font-size:.8rem;white-space:nowrap}";
+.hmeta{color:var(--muted);font-size:.8rem;white-space:nowrap}\
+.srow{display:flex;align-items:center;gap:.8rem;padding:.3rem 0}\
+.sname{flex:0 0 9rem;font-size:.85rem;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\
+.scurve{flex:1 1 auto;height:44px;width:100%;display:block}\
+.scurve .area{fill:var(--calm);opacity:.14}\
+.scurve .line{fill:none;stroke:var(--calm);stroke-width:1.4;vector-effect:non-scaling-stroke}\
+.scurve .mid{stroke:var(--line);stroke-width:1;stroke-dasharray:3 3;vector-effect:non-scaling-stroke}\
+.smeta{flex:0 0 auto;color:var(--muted);font-size:.82rem;white-space:nowrap;font-variant-numeric:tabular-nums}";
 
 /// Self-contained HTML report (the `report` command / `--report`): one web page
 /// carrying the same semantics as all three terminal views — the verdict-first
@@ -471,6 +537,9 @@ pub fn write_report(
         "Changed often AND deeply nested — the highest-ROI refactor targets · {window}. \
          Nx = commits that touched the file · cx = nesting complexity."
     );
+    let surv_sub = "Every deleted line is weighted by S(age) — its odds of having lived \
+        this long, read off the repo's own line-lifetime curve. The dashed line is 50%; \
+        where the curve crosses it is the half-life. Fit per repo.";
 
     let html = format!(
         "<!doctype html><html lang=en><head><meta charset=utf-8>\
@@ -479,6 +548,8 @@ pub fn write_report(
 <body><main class=wrap>\
 <header><h1>terminal velocity</h1><div class=meta>{branch} · {window_lbl}</div></header>\
 <section class=\"verdict {mood}\">{verdict}</section>\
+<section class=section><h2>code survival — S(age)</h2>\
+<p class=sub>{surv_sub}</p><div class=panel>{survival}</div></section>\
 <section class=grid>{cards}</section>\
 <section class=section><h2>thrash — in-place rewrite</h2>\
 <p class=sub>{thr_sub}</p><div class=panel>{thrash}</div></section>\
@@ -494,6 +565,8 @@ against this repo's own history, not external benchmarks.</div></footer>\
         footer = esc(&c.footer),
         thr_sub = esc(&thr_sub),
         hot_sub = esc(&hot_sub),
+        surv_sub = esc(surv_sub),
+        survival = report_survival(&c.survival),
         thrash = report_thrash(tree, recent),
         hot = report_hotspots(hotspots, multi),
         css = REPORT_CSS,
@@ -501,6 +574,59 @@ against this repo's own history, not external benchmarks.</div></footer>\
 
     fs::write(path, html).map_err(|e| format!("failed to write {path}: {e}"))?;
     Ok(())
+}
+
+/// The survival curve(s) as HTML rows — an SVG area chart per repo, with the
+/// half-life and alive-at-HEAD fraction alongside.
+fn report_survival(survivals: &[RepoSurvival]) -> String {
+    if survivals.is_empty() {
+        return "<p class=empty>(no survival data)</p>".to_string();
+    }
+    let multi = survivals.len() > 1;
+    let mut out = String::new();
+    for s in survivals {
+        let name = if multi {
+            format!("<span class=sname>{}</span>", esc(&s.label))
+        } else {
+            String::new()
+        };
+        out.push_str(&format!(
+            "<div class=srow>{name}{svg}\
+               <span class=smeta>half-life {hl} · {alive:.0}% alive</span></div>",
+            svg = survival_svg(&s.curve),
+            hl = esc(&s.half_life),
+            alive = s.alive_pct,
+        ));
+    }
+    out
+}
+
+/// S(age) as an SVG area chart: y = survival (1 at top), x = age. A dashed 50%
+/// gridline so the half-life crossing is visible. Stretches to its container.
+fn survival_svg(curve: &[f64]) -> String {
+    if curve.len() < 2 {
+        return "<span class=smeta>(no deaths in range)</span>".to_string();
+    }
+    let (w, h) = (100.0_f64, 32.0_f64);
+    let n = curve.len();
+    let pt = |i: usize| -> (f64, f64) {
+        let x = i as f64 / (n - 1) as f64 * w;
+        let y = (1.0 - curve[i].clamp(0.0, 1.0)) * h;
+        (x, y)
+    };
+    let (x0, y0) = pt(0);
+    let mut line = format!("M{x0:.1},{y0:.1}");
+    for i in 1..n {
+        let (x, y) = pt(i);
+        line.push_str(&format!(" L{x:.1},{y:.1}"));
+    }
+    let area = format!("{line} L{w:.0},{h:.0} L0,{h:.0} Z");
+    format!(
+        "<svg class=scurve viewBox=\"0 0 {w:.0} {h:.0}\" preserveAspectRatio=none>\
+           <line class=mid x1=0 y1=\"{mid:.0}\" x2=\"{w:.0}\" y2=\"{mid:.0}\"/>\
+           <path class=area d=\"{area}\"/><path class=line d=\"{line}\"/></svg>",
+        mid = h / 2.0,
+    )
 }
 
 /// The thrash folder tree as HTML rows — same prune/scale/sort as the terminal.

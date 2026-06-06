@@ -16,19 +16,23 @@ hold — not the burst you imagine.
 ```
 terminal velocity · main · last 7d vs trailing 8wk
 ────────────────────────────────────────────────────────────
-BUILD FLOW: steady, batches creeping. Watch: batch median
-190→240, split smaller.
+BUILD FLOW: steady, batches creeping. No thrash spiral.
+Watch: batch median 190→240, split smaller.
 ────────────────────────────────────────────────────────────
-  flow      ·······  pending
-            └ survival-weighted build flow — needs the blame pass
+code survival  █▇▇▆▆▅▄▄▄▄▃▃▃▁▁▁  half-life ~491c / ~86d · 76% of lines still alive
+  S(age) = a deleted line's odds of having lived this long;
+  thrash and excision weight every death by it.
+────────────────────────────────────────────────────────────
+  flow      ▁▂▁▁▁█▃   ramping · ~19059 lines/wk
   batch     ▃▃▄▅▆▆▇   rising · median 190→240 (p78 for you)
             └ split smaller — cheapest flow win
-  thrash    ·······  pending
-  excision  ·······  pending
+  thrash    ▇▅█▃▃▁▆   low · 6.1% of churn
+            └ low — your speed is real throughput, not thrashing
+  excision  ▂█▂▂▁▆▃   healthy · 9.6% of churn
+            └ deliberate scope-cutting (healthy)
   cadence   ▁▂▂▃▂▂▃   steady · nights 14% · weekends 9% (local, UTC-4)
 ────────────────────────────────────────────────────────────
-half-life ~(pending) · net +334k (… added, … deleted) · run
-`tv thrash` / `tv hotspots` to drill in
+net +334k (… added, … deleted) · run `tv thrash` / `tv hotspots` to drill in
 ```
 
 ## Why it exists
@@ -73,8 +77,13 @@ spinning") matters as much as the alarms.
 | **flow** | survival-weighted build-flow rate | ✅ live |
 | **thrash** | in-place rewrite, S-weighted (the risk signal) | ✅ live · `tv thrash` by area |
 | **excision** | wholesale removal (healthy scope-cutting) | ✅ live |
-| **half-life** | code-survival median (Kaplan-Meier) | ✅ live |
+| **survival** | the S(age) curve + half-life + % still alive (Kaplan-Meier) | ✅ live · shown under the verdict |
 | **hotspots** | churn × complexity, by file | ✅ live · `tv hotspots` |
+
+`tv status` and `tv report` lead with the **survival curve** — S(age), a deleted
+line's odds of having lived this long — because thrash and excision weight every
+death by it. It's fit per repo (so each repo is judged by its own line lifetimes)
+and shown as the curve shape, the half-life, and the still-alive fraction.
 
 `tv thrash` ranks in-place rewrite by directory; `tv hotspots` ranks files by
 churn × complexity — both aggregate by area, never by author.

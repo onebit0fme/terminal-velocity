@@ -63,6 +63,19 @@ pub fn survival_at(times: &[f64], surv: &[f64], age: f64) -> f64 {
     result
 }
 
+/// Sample S at `n` evenly spaced ages over [0, `max_age`] — the curve shape, for
+/// a sparkline (terminal) or area chart (report). Decreasing from ~1 toward the
+/// alive-at-HEAD plateau.
+pub fn sample_survival(times: &[f64], surv: &[f64], n: usize, max_age: f64) -> Vec<f64> {
+    if n == 0 || max_age <= 0.0 {
+        return Vec::new();
+    }
+    let last = (n - 1).max(1) as f64;
+    (0..n)
+        .map(|i| survival_at(times, surv, max_age * i as f64 / last))
+        .collect()
+}
+
 /// First age where S <= 0.5, or None if the median is never reached
 /// (>50% of lines never die — common in young/durable repos).
 pub fn half_life(times: &[f64], surv: &[f64]) -> Option<f64> {

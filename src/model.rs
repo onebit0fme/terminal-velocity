@@ -89,12 +89,28 @@ pub struct Card {
     pub available: bool,
 }
 
+/// One repo's survival curve, surfaced as the foundation the other stats rest on.
+#[derive(Clone, Debug)]
+pub struct RepoSurvival {
+    /// Repo label (shown only when several are aggregated).
+    pub label: String,
+    /// S(age) sampled over line age (oldest→newest age), for a sparkline/SVG.
+    pub curve: Vec<f64>,
+    /// Half-life, compact: "~491c / ~86d" or "not reached".
+    pub half_life: String,
+    /// % of analyzed lines still alive at HEAD (the right-censored fraction).
+    pub alive_pct: f64,
+}
+
 /// The whole one-screen cockpit. Verdict first; cards are the drill-down.
 #[derive(Clone, Debug)]
 pub struct Cockpit {
     pub branch: String,
     pub window: String,
     pub verdict: String,
+    /// The survival curve(s) — S(age) — that weight thrash/excision. Shown right
+    /// under the verdict so the rest of the board has a foundation.
+    pub survival: Vec<RepoSurvival>,
     pub cards: Vec<Card>,
     pub footer: String,
     /// Weeks of history available; drives the coverage-honesty rule.
