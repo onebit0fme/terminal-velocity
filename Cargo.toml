@@ -1,0 +1,27 @@
+[package]
+name = "terminal-velocity"
+version = "0.0.1"
+edition = "2021"
+description = "Is your build's speed real throughput, or just thrashing? A git-status for build-flow health."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["git", "velocity", "metrics", "cli", "devex"]
+categories = ["command-line-utilities", "development-tools"]
+
+# The binary is `tv`; the package is `terminal-velocity` (rename the package at
+# publish time if crates.io is taken — the binary name is independent).
+[[bin]]
+name = "tv"
+path = "src/main.rs"
+
+# Intentionally zero dependencies for now: the scaffold is std-only so it builds
+# offline with nothing to fetch. Planned, as the tool grows:
+#   clap         — argument parsing (replacing the hand-rolled parser)
+#   serde + bincode/json — incremental death-record cache, keyed by HEAD sha
+#   owo-colors   — TTY color (auto-disabled when piped)
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

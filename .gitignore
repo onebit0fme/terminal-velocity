@@ -1,0 +1,4 @@
+/target
+Cargo.lock        # this is a binary/CLI; lock is fine to commit later, ignored for now
+tv-report.html    # generated HTML report
+.tv-cache         # incremental death-record cache (per-repo, regenerable)

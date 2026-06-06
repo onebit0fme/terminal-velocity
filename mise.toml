@@ -1,0 +1,42 @@
+# Dev tasks for Terminal Velocity. The toolchain itself is pinned by
+# rust-toolchain.toml (rustup honors it); these are just shortcuts.
+#   mise tasks            list tasks
+#   mise run build
+#   mise run run -- --repo /path/to/repo
+#   mise run check        the full local gate (fmt + clippy + test)
+
+[tasks.build]
+description = "Compile (debug)"
+run = "cargo build"
+
+[tasks.release]
+description = "Compile the optimized binary -> target/release/tv"
+run = "cargo build --release"
+
+[tasks.run]
+description = "Run the cockpit; pass args after --, e.g. mise run run -- --repo ."
+run = "cargo run --"
+
+[tasks.cockpit]
+description = "Run tv against the current directory"
+run = "cargo run -- --repo ."
+
+[tasks.test]
+description = "Run unit tests"
+run = "cargo test"
+
+[tasks.fmt]
+description = "Format the code in place"
+run = "cargo fmt"
+
+[tasks.fmt-check]
+description = "Check formatting (read-only gate)"
+run = "cargo fmt --check"
+
+[tasks.lint]
+description = "Clippy with warnings as errors"
+run = "cargo clippy --all-targets -- -D warnings"
+
+[tasks.check]
+description = "Full local gate: fmt-check + lint + test"
+depends = ["fmt-check", "lint", "test"]
