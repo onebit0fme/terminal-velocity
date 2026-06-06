@@ -428,6 +428,23 @@ fn run(cfg: Config) -> Result<(), String> {
     let (paths, labels, anchors, anchor_note) =
         resolve_anchors(&cfg.repos, &base_labels, cfg.at.as_deref())?;
     let multi = paths.len() > 1;
+    // Date of the newest anchor (the window's upper edge) — `None` at HEAD. The
+    // renderers use it to turn "last 7d" into an explicit "as of <date>" frame.
+    let as_of: Option<String> = if cfg.at.is_some() {
+        let mut best_ts = i64::MIN;
+        let mut best_date: Option<String> = None;
+        for (a, p) in anchors.iter().zip(&paths) {
+            if let Ok(ts) = git::commit_ts(p, &a.rev) {
+                if ts > best_ts {
+                    best_ts = ts;
+                    best_date = git::commit_date(p, &a.rev).ok();
+                }
+            }
+        }
+        best_date
+    } else {
+        None
+    };
     // `report` command and the `--report` flag are the same thing: the full page.
     let want_report = cfg.report || matches!(cfg.command, Command::Report);
 
@@ -479,8 +496,15 @@ fn run(cfg: Config) -> Result<(), String> {
                 Some(latest_ts_across(&paths, &anchors)? - WINDOW_SECS)
             };
             let per_repo = repo_files(&paths, &labels, &anchors, since, &author_pats)?;
-            let rows = metrics::hotspots(&per_repo, 12);
-            render::print_hotspots(&rows, since.is_some(), multi, &palette);
+            let rows = metrics::hotspots(&per_repo);
+            render::print_hotspots(
+                &header,
+                &rows,
+                since.is_some(),
+                multi,
+                as_of.as_deref(),
+                &palette,
+            );
             return Ok(());
         }
         // Cadence is a commit-time punchcard — commits only, no blame pass.
@@ -528,11 +552,12 @@ fn run(cfg: Config) -> Result<(), String> {
     };
 
     if want_report {
-        let cockpit = metrics::build_cockpit(&commits, &cols, &header, me.as_ref());
+        let cockpit =
+            metrics::build_cockpit(&commits, &cols, &header, me.as_ref(), as_of.as_deref());
         let churn = repo_churn(&paths, &labels, &anchors, since, &author_pats)?;
         let tree = metrics::thrash_tree(&cols, &churn, since, recent_cut, multi, me.as_ref());
         let files = repo_files(&paths, &labels, &anchors, since, &author_pats)?;
-        let rows = metrics::hotspots(&files, 12);
+        let rows = metrics::hotspots(&files);
         let heat = metrics::cadence_heatmap(&commits);
         let path = "tv-report.html";
         render::write_report(&cockpit, &tree, &rows, &heat, since.is_some(), multi, path)?;
@@ -542,13 +567,14 @@ fn run(cfg: Config) -> Result<(), String> {
 
     match cfg.command {
         Command::Status => {
-            let cockpit = metrics::build_cockpit(&commits, &cols, &header, me.as_ref());
+            let cockpit =
+                metrics::build_cockpit(&commits, &cols, &header, me.as_ref(), as_of.as_deref());
             render::print_cockpit(&cockpit, &palette);
         }
         Command::Thrash => {
             let churn = repo_churn(&paths, &labels, &anchors, since, &author_pats)?;
             let tree = metrics::thrash_tree(&cols, &churn, since, recent_cut, multi, me.as_ref());
-            render::print_thrash(&header, &tree, since.is_some(), &palette);
+            render::print_thrash(&header, &tree, since.is_some(), as_of.as_deref(), &palette);
         }
         _ => unreachable!(),
     }

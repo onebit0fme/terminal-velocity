@@ -138,6 +138,9 @@ pub struct Heatmap {
 pub struct Cockpit {
     pub branch: String,
     pub window: String,
+    /// `--at`: date of the anchor (the window's upper edge); `None` at HEAD. Lets
+    /// the report frame its drill-downs as "… to <date>" instead of implying now.
+    pub as_of: Option<String>,
     pub verdict: String,
     /// The survival curve(s) — S(age) — that weight thrash/excision. Shown right
     /// under the verdict so the rest of the board has a foundation.

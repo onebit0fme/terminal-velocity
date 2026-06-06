@@ -76,6 +76,7 @@ pub fn build_cockpit(
     repos: &[(String, Collection)],
     branch: &str,
     me: Option<&Me>,
+    as_of: Option<&str>,
 ) -> Cockpit {
     let anchor = commits.iter().map(|c| c.ts).max().unwrap_or(0);
     let min_ts = commits.iter().map(|c| c.ts).min().unwrap_or(anchor);
@@ -161,7 +162,14 @@ pub fn build_cockpit(
 
     Cockpit {
         branch: branch.to_string(),
-        window: "last 7d vs trailing 8wk".to_string(),
+        // The branch label already carries the "as of <date>" when anchored, so
+        // the window just drops the now-implying "last".
+        window: if as_of.is_some() {
+            "7d vs trailing 8wk".to_string()
+        } else {
+            "last 7d vs trailing 8wk".to_string()
+        },
+        as_of: as_of.map(str::to_string),
         verdict,
         survival,
         personal: me.is_some(),
@@ -655,10 +663,35 @@ pub struct Hotspot {
     pub score: f64,
 }
 
+/// The "vital few" share: how much of a total a self-scaling cut should keep. The
+/// Pareto 80/20 — show the smallest set carrying 80% of the heat, so the count
+/// follows the distribution (peaked → few, diffuse → more) instead of a magic N.
+pub const VITAL_FEW: f64 = 0.8;
+
+/// Smallest prefix of a descending-sorted score list whose sum reaches `share` of
+/// the total — the cut that keeps the vital few. `0` for an empty/zero list;
+/// otherwise ≥1. The single self-calibrating limiter for hotspots and the tree.
+pub fn pareto_count(desc: &[f64], share: f64) -> usize {
+    let total: f64 = desc.iter().sum();
+    if total <= 0.0 {
+        return 0;
+    }
+    let cut = total * share;
+    let mut acc = 0.0;
+    for (i, &v) in desc.iter().enumerate() {
+        acc += v;
+        if acc >= cut {
+            return i + 1;
+        }
+    }
+    desc.len()
+}
+
 /// Files ranked by change-frequency × complexity — files edited often AND deeply
-/// nested are the highest-ROI refactor targets. Ranked across all repos, but each
-/// row keeps its repo so same-named files in different repos stay distinct.
-pub fn hotspots(per_repo: &[RepoFiles], top: usize) -> Vec<Hotspot> {
+/// nested are the highest-ROI refactor targets. Ranked across all repos (each row
+/// keeps its repo so same-named files stay distinct), fully sorted; the view
+/// applies the [`pareto_count`] cut so there's no arbitrary top-N truncation here.
+pub fn hotspots(per_repo: &[RepoFiles]) -> Vec<Hotspot> {
     let mut rows: Vec<Hotspot> = Vec::new();
     for (label, freq, complexity) in per_repo {
         for (file, &cx) in complexity {
@@ -679,6 +712,5 @@ pub fn hotspots(per_repo: &[RepoFiles], top: usize) -> Vec<Hotspot> {
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    rows.truncate(top);
     rows
 }

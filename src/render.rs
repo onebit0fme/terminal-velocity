@@ -4,7 +4,7 @@
 
 use std::fs;
 
-use crate::metrics::{Hotspot, TreeNode};
+use crate::metrics::{pareto_count, Hotspot, TreeNode, VITAL_FEW};
 use crate::model::{Card, Cockpit, Heatmap, RepoSurvival, Tone};
 use crate::spark::sparkline;
 use crate::style::Palette;
@@ -200,8 +200,20 @@ fn thr_tone(pct: f64) -> Tone {
     }
 }
 
-pub fn print_thrash(branch: &str, root: &TreeNode, recent: bool, p: &Palette) {
-    let window = if recent { "last 8wk" } else { "all-time" };
+/// The window descriptor for the drill-downs. When anchored (`as_of` set) it drops
+/// the now-implying "last" — the date is already shown, and "8wk to <date>" /
+/// "all-time thru <date>" makes the trailing frame explicit on a header-less view.
+fn window_label(recent: bool, as_of: Option<&str>) -> String {
+    match (recent, as_of) {
+        (true, None) => "last 8wk".to_string(),
+        (true, Some(d)) => format!("8wk to {d}"),
+        (false, None) => "all-time".to_string(),
+        (false, Some(d)) => format!("all-time thru {d}"),
+    }
+}
+
+pub fn print_thrash(branch: &str, root: &TreeNode, recent: bool, as_of: Option<&str>, p: &Palette) {
+    let window = window_label(recent, as_of);
     println!(
         "{} {}",
         p.bold("tv thrash"),
@@ -216,27 +228,32 @@ pub fn print_thrash(branch: &str, root: &TreeNode, recent: bool, p: &Palette) {
         "{}",
         p.dim("by how recent. by folder. % = thrash as a share of that folder's churn.")
     );
+    println!(
+        "{}",
+        p.dim("shows the folders that carry 80% of the rework — the vital few.")
+    );
     if recent {
-        println!(
-            "{}",
-            p.dim("↑ heating / ↓ cooling = last 7d vs the 8-week pace.")
-        );
+        // "last" only when the window ends now; anchored, it's the 7d before the anchor.
+        let traj = if as_of.is_some() {
+            "↑ heating / ↓ cooling = 7d vs the 8-week pace."
+        } else {
+            "↑ heating / ↓ cooling = last 7d vs the 8-week pace."
+        };
+        println!("{}", p.dim(traj));
     }
     println!();
     if root.thrash <= 0.0 || root.children.is_empty() {
         println!("  (no rework recorded)");
         return;
     }
-    // Prune folders below 2.5% of total thrash — depth follows naturally.
-    let min = (root.thrash * 0.025).max(1.0);
     let scale = root
         .children
         .values()
         .map(|c| c.thrash)
         .fold(0.0_f64, f64::max)
         .max(1.0);
-    let mut shown = 0usize;
-    print_branch(p, root, scale, min, "", recent, &mut shown);
+    let floor = thrash_floor(root);
+    print_branch(p, root, scale, floor, "", recent);
 
     println!("{}", p.dim(&rule()));
     println!(
@@ -268,33 +285,56 @@ fn traj_arrow(p: &Palette, recent: bool, node: &TreeNode) -> String {
     }
 }
 
-/// Print a folder's children as an indented tree, biggest first, pruning < `min`.
-fn print_branch(
-    p: &Palette,
-    node: &TreeNode,
-    scale: f64,
-    min: f64,
-    prefix: &str,
-    recent: bool,
-    shown: &mut usize,
-) {
+/// Each folder's *own* (non-inherited) rework = its thrash minus its children's.
+/// These partition the tree's total exactly, so collecting them lets one Pareto
+/// cut set a single global significance floor.
+fn own_contributions(node: &TreeNode, out: &mut Vec<f64>) {
+    let kids: f64 = node.children.values().map(|c| c.thrash).sum();
+    let own = node.thrash - kids;
+    if own > 0.0 {
+        out.push(own);
+    }
+    for c in node.children.values() {
+        own_contributions(c, out);
+    }
+}
+
+/// The single, self-calibrating tree limiter: the rework level below which a
+/// folder isn't worth showing. Set so the visible folders carry ~80% of the total
+/// rework (Pareto over per-folder own-contributions) — replaces the old 2.5%
+/// threshold + 40-node cap. Floored at 1.0 so trivial nodes never show.
+fn thrash_floor(root: &TreeNode) -> f64 {
+    let mut owns = Vec::new();
+    own_contributions(root, &mut owns);
+    owns.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let k = pareto_count(&owns, VITAL_FEW);
+    if k == 0 {
+        f64::INFINITY
+    } else {
+        owns[k - 1].max(1.0)
+    }
+}
+
+/// A node's children worth showing (subtree ≥ `floor`), biggest-thrash first.
+fn kept_children(node: &TreeNode, floor: f64) -> Vec<(&String, &TreeNode)> {
     let mut kids: Vec<(&String, &TreeNode)> = node
         .children
         .iter()
-        .filter(|(_, c)| c.thrash >= min)
+        .filter(|(_, c)| c.thrash >= floor)
         .collect();
     kids.sort_by(|a, b| {
         b.1.thrash
             .partial_cmp(&a.1.thrash)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    kids
+}
 
+/// Print a folder's children as an indented tree, biggest first, above `floor`.
+fn print_branch(p: &Palette, node: &TreeNode, scale: f64, floor: f64, prefix: &str, recent: bool) {
+    let kids = kept_children(node, floor);
     let n = kids.len();
-    for (i, (name, child)) in kids.into_iter().enumerate() {
-        if *shown >= 40 {
-            return; // hard safety cap; the prune normally bounds it well below
-        }
-        *shown += 1;
+    for (i, (name, child)) in kids.iter().enumerate() {
         let last = i == n - 1;
         let connector = if last { "└─ " } else { "├─ " };
         let pct = if child.churn > 0.0 {
@@ -311,37 +351,47 @@ fn print_branch(
             p.dim(&format!("· {pct:.0}%")),
         );
         let child_prefix = format!("{prefix}{}", if last { "   " } else { "│  " });
-        print_branch(p, child, scale, min, &child_prefix, recent, shown);
+        print_branch(p, child, scale, floor, &child_prefix, recent);
     }
 }
 
-pub fn print_hotspots(rows: &[Hotspot], recent: bool, multi: bool, p: &Palette) {
-    let window = if recent { "last 8wk" } else { "all-time" };
+pub fn print_hotspots(
+    scope: &str,
+    rows: &[Hotspot],
+    recent: bool,
+    multi: bool,
+    as_of: Option<&str>,
+    p: &Palette,
+) {
+    let window = window_label(recent, as_of);
     println!(
         "{} {}",
         p.bold("tv hotspots"),
-        p.dim(&format!("· {window} · revisions × complexity"))
+        p.dim(&format!("· {scope} · {window} · revisions × complexity"))
     );
     println!("{}", p.dim(&rule()));
     println!(
         "{}",
         p.dim("files changed often AND deeply nested — refactoring these pays off most.")
     );
-    println!(
-        "{}",
-        p.dim("Nx = commits that touched the file · cx = indentation complexity (nesting).")
-    );
-    println!();
     if rows.is_empty() {
+        println!();
         println!("  (no files)");
         return;
     }
-    let max = rows
-        .iter()
-        .map(|r| r.score)
-        .fold(0.0_f64, f64::max)
-        .max(1.0);
-    for r in rows {
+    // Self-scaling cut: the vital few that carry 80% of the heat — no magic top-N.
+    let scores: Vec<f64> = rows.iter().map(|r| r.score).collect();
+    let cut = pareto_count(&scores, VITAL_FEW).max(1);
+    println!(
+        "{}",
+        p.dim(&format!(
+            "the 80% that carries the heat: {cut} of {} · Nx = commits touched · cx = nesting.",
+            rows.len()
+        ))
+    );
+    println!();
+    let max = rows[0].score.max(1.0); // sorted desc → the hottest scales the bars
+    for r in &rows[..cut] {
         // sqrt scaling so the list past the top file stays readable; the numbers
         // carry the real magnitude.
         let stats = if multi {
@@ -354,6 +404,12 @@ pub fn print_hotspots(rows: &[Hotspot], recent: bool, multi: bool, p: &Palette) 
             hbar(p, (r.score / max).sqrt(), 10, Tone::Watch),
             trunc(&r.file, 38),
             p.dim(&stats),
+        );
+    }
+    if rows.len() > cut {
+        println!(
+            "{}",
+            p.dim(&format!("  +{} more below the cut", rows.len() - cut))
         );
     }
 }
@@ -437,7 +493,7 @@ terminal velocity · decision tree
 how every word in the cockpit is decided.
   ● self-calibrated to your repo (no magic number)
   ○ tunable constant (the only hand-set knobs)
-  ▸ sparklines run 8 weeks old→new — the bold last bar is this week
+  ▸ sparklines run 8 weeks old→new — the bold last bar is the latest week in view
 
 INTENT · per commit, first match wins
 ├─ subject has \"revert\" ···················· revert
@@ -456,7 +512,7 @@ FLOW · ● weekly throughput vs your own median
 ├─ ○ recent < 0.70× ··· slowing → \"blocked, or shipping less?\"
 └─ else ··············· steady
 
-BATCH · ● lines/commit this week vs your median  (smaller = faster)
+BATCH · ● lines/commit in the latest week vs your median  (smaller = faster)
 ├─ ○ recent > 1.25× ··· rising  → \"split smaller — cheapest flow win\"
 ├─ ○ recent < 0.80× ··· easing
 └─ else ··············· steady   (headline shows p__ = your percentile)
@@ -511,6 +567,9 @@ font:15px/1.55 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Aria
 .wrap{max-width:720px;margin:0 auto;padding:2.5rem 1.25rem 4rem}\
 h1{font-size:1rem;font-weight:600;margin:0;letter-spacing:.01em}\
 .meta{color:var(--muted);font-size:.85rem;margin-top:.15rem}\
+.asof{display:inline-block;margin-top:.55rem;padding:.22rem .65rem;border-radius:999px;\
+background:var(--watchbg);color:var(--watch);border:1px solid var(--watch);\
+font-size:.8rem;font-weight:600;letter-spacing:.01em;font-variant-numeric:tabular-nums}\
 .verdict{margin:1.4rem 0;padding:.95rem 1.15rem;background:var(--panel);border:1px solid var(--line);\
 border-left:4px solid var(--calm);border-radius:10px;font-weight:500}\
 .verdict.good{border-left-color:var(--good)}\
@@ -546,6 +605,14 @@ footer{margin-top:1.6rem;border-top:1px solid var(--line);padding-top:1rem;color
 .tnum{color:var(--ink);min-width:3.6rem;text-align:right;font-weight:500}\
 .tpct{color:var(--muted);min-width:2.8rem;text-align:right}\
 .traj{width:1rem;text-align:center;font-weight:700}\
+details.tnode>summary{list-style:none;cursor:pointer}\
+details.tnode>summary::-webkit-details-marker{display:none}\
+details.tnode>summary::marker{content:\"\"}\
+.tw{display:inline-block;width:1.1em;color:var(--muted);font-size:.7em;vertical-align:1px}\
+details.tnode>summary .tw::before{content:\"\u{25B8}\"}\
+details.tnode[open]>summary .tw::before{content:\"\u{25BE}\"}\
+summary.trow:hover{background:var(--calmbg);border-radius:6px}\
+.hrow.more{color:var(--muted);font-size:.82rem;padding-left:.4rem;margin-top:.1rem}\
 .traj.up{color:var(--watch)}.traj.down{color:var(--good)}.traj.flat{color:var(--muted)}\
 .hrow{display:flex;align-items:center;gap:.6rem;padding:.18rem 0;font-size:.88rem;font-variant-numeric:tabular-nums}\
 .hfile{flex:1 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;\
@@ -577,6 +644,7 @@ pub fn write_report(
     multi: bool,
     path: &str,
 ) -> Result<(), String> {
+    let as_of = c.as_of.as_deref();
     let worst = c
         .cards
         .iter()
@@ -605,7 +673,12 @@ pub fn write_report(
         ));
     }
 
-    let window = if recent { "last 8 weeks" } else { "all-time" };
+    let window = match (recent, as_of) {
+        (true, None) => "last 8 weeks".to_string(),
+        (true, Some(d)) => format!("8 weeks to {d}"),
+        (false, None) => "all-time".to_string(),
+        (false, Some(d)) => format!("all-time thru {d}"),
+    };
     let thr_sub = if recent {
         format!(
             "In-place rewrite, weighted by recency, by folder · {window}. \
@@ -637,20 +710,30 @@ pub fn write_report(
              crosses it is the half-life. Fit per repo.",
         )
     };
+    let cad_window = match as_of {
+        Some(d) => format!("all history thru {d}"),
+        None => "all history".to_string(),
+    };
     let cad_sub = format!(
-        "When commits land, by weekday and hour ({}, all history). \
+        "When commits land, by weekday and hour ({}, {cad_window}). \
          Darker = busier; peak {} {:02}:00.",
         esc(&heat.tz),
         DAYS[heat.peak_day],
         heat.peak_hour,
     );
+    // A loud, unmissable flag that the whole page is a point-in-time snapshot —
+    // the report is shared, where reading a rewound view as "today" is costly.
+    let asof_badge = match as_of {
+        Some(d) => format!("<div class=asof>snapshot · as of {}</div>", esc(d)),
+        None => String::new(),
+    };
 
     let html = format!(
         "<!doctype html><html lang=en><head><meta charset=utf-8>\
 <meta name=viewport content=\"width=device-width,initial-scale=1\">\
 <title>Terminal Velocity · {branch}</title><style>{css}</style></head>\
 <body><main class=wrap>\
-<header><h1>terminal velocity</h1><div class=meta>{branch} · {window_lbl}</div></header>\
+<header><h1>terminal velocity</h1><div class=meta>{branch} · {window_lbl}</div>{asof_badge}</header>\
 <section class=\"verdict {mood}\">{verdict}</section>\
 <section class=section><h2>{surv_h2}</h2>\
 <p class=sub>{surv_sub}</p><div class=panel>{survival}</div></section>\
@@ -666,6 +749,7 @@ against this repo's own history, not external benchmarks.</div></footer>\
 </main></body></html>",
         branch = esc(&c.branch),
         window_lbl = esc(&c.window),
+        asof_badge = asof_badge,
         mood = tone_class(worst),
         verdict = esc(&c.verdict),
         footer = esc(&c.footer),
@@ -781,43 +865,30 @@ fn report_thrash(tree: &TreeNode, recent: bool) -> String {
     if tree.thrash <= 0.0 || tree.children.is_empty() {
         return "<p class=empty>(no rework recorded)</p>".to_string();
     }
-    let min = (tree.thrash * 0.025).max(1.0);
     let scale = tree
         .children
         .values()
         .map(|c| c.thrash)
         .fold(0.0_f64, f64::max)
         .max(1.0);
-    let mut out = String::new();
-    let mut shown = 0usize;
-    report_branch(tree, scale, min, 0, recent, &mut shown, &mut out);
+    let floor = thrash_floor(tree);
+    let mut out = String::from("<div class=ttree>");
+    report_branch(tree, scale, floor, 0, recent, &mut out);
+    out.push_str("</div>");
     out
 }
 
+/// Folders with a kept child become collapsible `<details>` (top level open, deeper
+/// folded); leaves are plain rows. Same global vital-few floor as the terminal.
 fn report_branch(
     node: &TreeNode,
     scale: f64,
-    min: f64,
+    floor: f64,
     depth: usize,
     recent: bool,
-    shown: &mut usize,
     out: &mut String,
 ) {
-    let mut kids: Vec<(&String, &TreeNode)> = node
-        .children
-        .iter()
-        .filter(|(_, c)| c.thrash >= min)
-        .collect();
-    kids.sort_by(|a, b| {
-        b.1.thrash
-            .partial_cmp(&a.1.thrash)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    for (name, child) in kids {
-        if *shown >= 40 {
-            return;
-        }
-        *shown += 1;
+    for (name, child) in kept_children(node, floor) {
         let pct = if child.churn > 0.0 {
             child.thrash / child.churn * 100.0
         } else {
@@ -825,17 +896,25 @@ fn report_branch(
         };
         let t = tone_class(thr_tone(pct));
         let w = (child.thrash / scale * 100.0).clamp(2.0, 100.0);
-        out.push_str(&format!(
-            "<div class=trow>\
-               <span class=\"tbar {t}\"><i style=\"width:{w:.0}%\"></i></span>\
-               <span class=tname style=\"padding-left:{pad:.2}rem\">{name}</span>{traj}\
-               <span class=tnum>{thr:.0}</span><span class=tpct>{pct:.0}%</span></div>",
-            pad = depth as f64 * 1.1,
+        let row = format!(
+            "<span class=\"tbar {t}\"><i style=\"width:{w:.0}%\"></i></span>\
+             <span class=tname style=\"padding-left:{pad:.2}rem\"><span class=tw></span>{name}</span>\
+             {traj}<span class=tnum>{thr:.0}</span><span class=tpct>{pct:.0}%</span>",
+            pad = depth as f64 * 1.0,
             name = esc(name),
             traj = report_traj(child, recent),
             thr = child.thrash,
-        ));
-        report_branch(child, scale, min, depth + 1, recent, shown, out);
+        );
+        if kept_children(child, floor).is_empty() {
+            out.push_str(&format!("<div class=\"trow leaf\">{row}</div>"));
+        } else {
+            let open = if depth == 0 { " open" } else { "" };
+            out.push_str(&format!(
+                "<details class=tnode{open}><summary class=trow>{row}</summary>"
+            ));
+            report_branch(child, scale, floor, depth + 1, recent, out);
+            out.push_str("</details>");
+        }
     }
 }
 
@@ -864,13 +943,11 @@ fn report_hotspots(rows: &[Hotspot], multi: bool) -> String {
     if rows.is_empty() {
         return "<p class=empty>(no files)</p>".to_string();
     }
-    let max = rows
-        .iter()
-        .map(|r| r.score)
-        .fold(0.0_f64, f64::max)
-        .max(1.0);
+    // Same vital-few cut as the terminal — the 80% of heat, no magic top-N.
+    let cut = pareto_count(&rows.iter().map(|r| r.score).collect::<Vec<_>>(), VITAL_FEW).max(1);
+    let max = rows[0].score.max(1.0); // sorted desc
     let mut out = String::new();
-    for r in rows {
+    for r in &rows[..cut] {
         let w = ((r.score / max).sqrt() * 100.0).clamp(2.0, 100.0);
         let meta = if multi {
             format!("{}× · cx {} · {}", r.freq, r.complexity, esc(&r.repo))
@@ -882,6 +959,12 @@ fn report_hotspots(rows: &[Hotspot], multi: bool) -> String {
                <span class=hbar><i style=\"width:{w:.0}%\"></i></span>\
                <span class=hfile>{file}</span><span class=hmeta>{meta}</span></div>",
             file = esc(&r.file),
+        ));
+    }
+    if rows.len() > cut {
+        out.push_str(&format!(
+            "<div class=\"hrow more\">+{} more below the cut</div>",
+            rows.len() - cut
         ));
     }
     out
