@@ -28,6 +28,7 @@ enum Command {
     Status,
     Thrash,
     Hotspots,
+    Cadence,
     Report,
     Explain,
 }
@@ -149,6 +150,7 @@ fn parse_args() -> Result<Config, String> {
             "status" => command = Command::Status,
             "thrash" => command = Command::Thrash,
             "hotspots" => command = Command::Hotspots,
+            "cadence" => command = Command::Cadence,
             "report" => command = Command::Report,
             "explain" | "tree" => command = Command::Explain,
             other => return Err(format!("unknown argument: {other}")),
@@ -178,7 +180,8 @@ COMMANDS:
     status      one-screen build-flow cockpit (default)
     thrash      in-place rewrite (S-weighted) ranked by directory
     hotspots    files ranked by churn × complexity
-    report      write all three to one self-contained HTML page (tv-report.html)
+    cadence     weekday × hour commit punchcard (when commits land)
+    report      write every view to one self-contained HTML page (tv-report.html)
     explain     print the heuristic decision tree
 
 OPTIONS:
@@ -247,6 +250,19 @@ fn run(cfg: Config) -> Result<(), String> {
             render::print_hotspots(&rows, since.is_some(), multi, &palette);
             return Ok(());
         }
+        // Cadence is a commit-time punchcard — commits only, no blame pass.
+        Command::Cadence if !want_report => {
+            let mut commits: Vec<model::Commit> = Vec::new();
+            for repo in &cfg.repos {
+                commits.extend(git::load_commits(repo).map_err(|e| format!("{repo}: {e}"))?);
+            }
+            if commits.is_empty() {
+                return Err("no non-merge commits found across the given repo(s)".into());
+            }
+            let heat = metrics::cadence_heatmap(&commits);
+            render::print_heatmap(&heat, &scope_label(&cfg.repos), &palette);
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -280,8 +296,9 @@ fn run(cfg: Config) -> Result<(), String> {
         let churn = repo_churn(&cfg.repos, &labels, since)?;
         let tree = metrics::thrash_tree(&repos, &churn, since, recent_cut, multi);
         let rows = metrics::hotspots(&repo_files(&cfg.repos, &labels, since)?, 12);
+        let heat = metrics::cadence_heatmap(&commits);
         let path = "tv-report.html";
-        render::write_report(&cockpit, &tree, &rows, since.is_some(), multi, path)?;
+        render::write_report(&cockpit, &tree, &rows, &heat, since.is_some(), multi, path)?;
         println!("wrote {path}");
         return Ok(());
     }

@@ -102,6 +102,20 @@ pub struct RepoSurvival {
     pub alive_pct: f64,
 }
 
+/// Weekday × hour commit punchcard — the cadence drill-down. `counts[day][hour]`,
+/// day 0 = Monday, hour 0..23 in local time.
+#[derive(Clone, Debug)]
+pub struct Heatmap {
+    pub counts: Vec<Vec<u32>>, // [7][24]
+    pub max: u32,
+    pub total: u32,
+    pub peak_day: usize,
+    pub peak_hour: usize,
+    pub tz: String,
+    pub weekend_pct: f64,
+    pub night_pct: f64,
+}
+
 /// The whole one-screen cockpit. Verdict first; cards are the drill-down.
 #[derive(Clone, Debug)]
 pub struct Cockpit {

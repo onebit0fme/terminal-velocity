@@ -5,11 +5,12 @@
 use std::fs;
 
 use crate::metrics::{Hotspot, TreeNode};
-use crate::model::{Card, Cockpit, RepoSurvival, Tone};
+use crate::model::{Card, Cockpit, Heatmap, RepoSurvival, Tone};
 use crate::spark::sparkline;
 use crate::style::Palette;
 
 const WIDTH: usize = 60;
+const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 fn rule() -> String {
     "─".repeat(WIDTH)
@@ -349,6 +350,76 @@ pub fn print_hotspots(rows: &[Hotspot], recent: bool, multi: bool, p: &Palette) 
     }
 }
 
+/// One punchcard cell: shaded block scaled to the busiest cell (GitHub-green).
+fn heat_cell(p: &Palette, count: u32, max: u32) -> String {
+    if count == 0 {
+        return "  ".to_string();
+    }
+    let lvl = if max == 0 {
+        1
+    } else {
+        ((count as f64 / max as f64) * 4.0).ceil().clamp(1.0, 4.0) as u8
+    };
+    match lvl {
+        1 => p.dim("░░"),
+        2 => p.green("▒▒"),
+        3 => p.green("▓▓"),
+        _ => p.bold(&p.green("██")),
+    }
+}
+
+/// The cadence drill-down: a weekday × hour commit punchcard (local time).
+pub fn print_heatmap(h: &Heatmap, scope: &str, p: &Palette) {
+    println!(
+        "{} {}",
+        p.bold("tv cadence"),
+        p.dim(&format!(
+            "· {scope} · when commits land · {} · all history",
+            h.tz
+        ))
+    );
+    println!("{}", p.dim(&rule()));
+    if h.total == 0 {
+        println!("  (no commits)");
+        return;
+    }
+    // hour axis: 5-char day gutter, then a tick every 3 hours (2 cols each).
+    let mut axis = String::from("     ");
+    for hh in (0..24).step_by(3) {
+        axis.push_str(&format!("{hh:<6}"));
+    }
+    println!("{}", p.dim(&axis));
+
+    for (d, row) in h.counts.iter().enumerate() {
+        let cells: String = (0..24).map(|hh| heat_cell(p, row[hh], h.max)).collect();
+        let day = p.bold(&format!("{:<3}", DAYS[d]));
+        println!(" {day} {cells}");
+    }
+
+    println!("{}", p.dim(&rule()));
+    println!(
+        "  {}  ·  {}",
+        p.bold(&format!(
+            "peak {} {:02}:00 ({} commits)",
+            DAYS[h.peak_day], h.peak_hour, h.max
+        )),
+        p.dim(&format!(
+            "{:.0}% weekend · {:.0}% night",
+            h.weekend_pct, h.night_pct
+        )),
+    );
+    println!(
+        "{}",
+        p.dim(&format!(
+            "  less {} {} {} {} more · night = 20:00–06:00",
+            p.dim("░░"),
+            p.green("▒▒"),
+            p.green("▓▓"),
+            p.bold(&p.green("██")),
+        ))
+    );
+}
+
 /// The heuristic decision tree, drawn in the terminal. Mirror of the logic in
 /// intent.rs / metrics.rs / verdict.rs — keep in sync when thresholds change.
 pub fn print_explain(p: &Palette) {
@@ -478,7 +549,12 @@ font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.82re
 .scurve .area{fill:var(--calm);opacity:.14}\
 .scurve .line{fill:none;stroke:var(--calm);stroke-width:1.4;vector-effect:non-scaling-stroke}\
 .scurve .mid{stroke:var(--line);stroke-width:1;stroke-dasharray:3 3;vector-effect:non-scaling-stroke}\
-.smeta{flex:0 0 auto;color:var(--muted);font-size:.82rem;white-space:nowrap;font-variant-numeric:tabular-nums}";
+.smeta{flex:0 0 auto;color:var(--muted);font-size:.82rem;white-space:nowrap;font-variant-numeric:tabular-nums}\
+.hgrid{display:grid;grid-template-columns:2.4rem repeat(24,1fr);gap:2px;align-items:center}\
+.hhour{font-size:.62rem;color:var(--muted);grid-row:1;overflow:visible;white-space:nowrap}\
+.hday{font-size:.72rem;color:var(--muted);padding-right:.4rem;white-space:nowrap}\
+.hgrid i.cell{height:13px;border-radius:2px;background:var(--good);display:block}\
+.hgrid i.cell.peak{outline:1.5px solid var(--ink);outline-offset:1px}";
 
 /// Self-contained HTML report (the `report` command / `--report`): one web page
 /// carrying the same semantics as all three terminal views — the verdict-first
@@ -488,6 +564,7 @@ pub fn write_report(
     c: &Cockpit,
     tree: &TreeNode,
     hotspots: &[Hotspot],
+    heat: &Heatmap,
     recent: bool,
     multi: bool,
     path: &str,
@@ -540,6 +617,13 @@ pub fn write_report(
     let surv_sub = "Every deleted line is weighted by S(age) — its odds of having lived \
         this long, read off the repo's own line-lifetime curve. The dashed line is 50%; \
         where the curve crosses it is the half-life. Fit per repo.";
+    let cad_sub = format!(
+        "When commits land, by weekday and hour ({}, all history). \
+         Darker = busier; peak {} {:02}:00.",
+        esc(&heat.tz),
+        DAYS[heat.peak_day],
+        heat.peak_hour,
+    );
 
     let html = format!(
         "<!doctype html><html lang=en><head><meta charset=utf-8>\
@@ -551,6 +635,8 @@ pub fn write_report(
 <section class=section><h2>code survival — S(age)</h2>\
 <p class=sub>{surv_sub}</p><div class=panel>{survival}</div></section>\
 <section class=grid>{cards}</section>\
+<section class=section><h2>cadence — when commits land</h2>\
+<p class=sub>{cad_sub}</p><div class=panel>{cadence}</div></section>\
 <section class=section><h2>thrash — in-place rewrite</h2>\
 <p class=sub>{thr_sub}</p><div class=panel>{thrash}</div></section>\
 <section class=section><h2>hotspots — refactor targets</h2>\
@@ -566,7 +652,9 @@ against this repo's own history, not external benchmarks.</div></footer>\
         thr_sub = esc(&thr_sub),
         hot_sub = esc(&hot_sub),
         surv_sub = esc(surv_sub),
+        cad_sub = esc(&cad_sub),
         survival = report_survival(&c.survival),
+        cadence = report_heatmap(heat),
         thrash = report_thrash(tree, recent),
         hot = report_hotspots(hotspots, multi),
         css = REPORT_CSS,
@@ -574,6 +662,44 @@ against this repo's own history, not external benchmarks.</div></footer>\
 
     fs::write(path, html).map_err(|e| format!("failed to write {path}: {e}"))?;
     Ok(())
+}
+
+/// The cadence punchcard as a CSS grid — opacity scales with commit count, the
+/// busiest cell outlined; each cell carries a hover title (day · hour · count).
+fn report_heatmap(h: &Heatmap) -> String {
+    if h.total == 0 {
+        return "<p class=empty>(no commits)</p>".to_string();
+    }
+    let mut g = String::from("<div class=hgrid><span class=hcorner></span>");
+    for hh in 0..24 {
+        let lbl = if hh % 3 == 0 {
+            hh.to_string()
+        } else {
+            String::new()
+        };
+        g.push_str(&format!("<span class=hhour>{lbl}</span>"));
+    }
+    for (d, row) in h.counts.iter().enumerate() {
+        g.push_str(&format!("<span class=hday>{}</span>", DAYS[d]));
+        for (hh, &c) in row.iter().enumerate() {
+            let op = if c == 0 {
+                0.0
+            } else {
+                0.12 + 0.88 * (c as f64 / h.max as f64)
+            };
+            let peak = if d == h.peak_day && hh == h.peak_hour {
+                " peak"
+            } else {
+                ""
+            };
+            g.push_str(&format!(
+                "<i class=\"cell{peak}\" style=\"opacity:{op:.2}\" title=\"{} {hh:02}:00 · {c}\"></i>",
+                DAYS[d],
+            ));
+        }
+    }
+    g.push_str("</div>");
+    g
 }
 
 /// The survival curve(s) as HTML rows — an SVG area chart per repo, with the

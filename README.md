@@ -71,7 +71,7 @@ spinning") matters as much as the alarms.
 | metric | what | status |
 |--------|------|--------|
 | **batch** | lines/commit, weekly-median trend; small batches flow faster | ✅ live |
-| **cadence** | night/weekend share; drift = burnout tripwire | ✅ live |
+| **cadence** | night/weekend share; drift = burnout tripwire | ✅ live · `tv cadence` punchcard |
 | **net flow** | added − deleted; building vs consolidating | ✅ live |
 | **intent mix** | feature/refactor/fix/… (heuristic) | ✅ live |
 | **flow** | survival-weighted build-flow rate | ✅ live |
@@ -86,7 +86,8 @@ death by it. It's fit per repo (so each repo is judged by its own line lifetimes
 and shown as the curve shape, the half-life, and the still-alive fraction.
 
 `tv thrash` ranks in-place rewrite by directory; `tv hotspots` ranks files by
-churn × complexity — both aggregate by area, never by author.
+churn × complexity; `tv cadence` draws a weekday × hour commit punchcard (when
+work lands, in local time) — all aggregate by area/time, never by author.
 
 ## How it decides
 
@@ -103,7 +104,7 @@ Needs a Rust toolchain (`rustup`, then `cargo`):
 cargo build --release          # zero dependencies; builds offline
 ./target/release/tv            # cockpit for the current repo
 ./target/release/tv --repo /path/to/repo
-./target/release/tv thrash     # or: hotspots, explain
+./target/release/tv thrash     # or: hotspots, cadence, explain
 ./target/release/tv report     # all three -> one HTML page (tv-report.html)
 cargo test                     # survival-curve unit tests
 ```

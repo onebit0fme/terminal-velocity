@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::git::Collection;
-use crate::model::{Card, Cockpit, Commit, RepoSurvival, Tone};
+use crate::model::{Card, Cockpit, Commit, Heatmap, RepoSurvival, Tone};
 use crate::spark::{median, percentile_rank, sparkline};
 use crate::survival::{half_life, km_survival, sample_survival, survival_at};
 use crate::verdict::{self, Signals};
@@ -167,6 +167,47 @@ pub fn build_cockpit(commits: &[Commit], repos: &[(String, Collection)], branch:
         cards,
         footer,
         coverage_weeks,
+    }
+}
+
+/// Weekday × hour commit punchcard (local time) — the `cadence` drill-down.
+/// Aggregates all commits given; cadence is a rhythm, read across full history.
+pub fn cadence_heatmap(commits: &[Commit]) -> Heatmap {
+    let tz = local_offset_secs();
+    let off = tz.unwrap_or(0);
+    let mut counts = vec![vec![0u32; 24]; 7];
+    let (mut total, mut weekend, mut night) = (0u32, 0u32, 0u32);
+    for c in commits {
+        let lt = c.ts + off;
+        counts[weekday_mon0(lt) as usize][hour_of(lt) as usize] += 1;
+        total += 1;
+        if is_weekend(lt) {
+            weekend += 1;
+        }
+        if is_night(lt) {
+            night += 1;
+        }
+    }
+    let (mut max, mut peak_day, mut peak_hour) = (0u32, 0usize, 0usize);
+    for (d, row) in counts.iter().enumerate() {
+        for (h, &n) in row.iter().enumerate() {
+            if n > max {
+                max = n;
+                peak_day = d;
+                peak_hour = h;
+            }
+        }
+    }
+    let denom = total.max(1) as f64;
+    Heatmap {
+        counts,
+        max,
+        total,
+        peak_day,
+        peak_hour,
+        tz: tz_label(tz),
+        weekend_pct: weekend as f64 / denom * 100.0,
+        night_pct: night as f64 / denom * 100.0,
     }
 }
 
