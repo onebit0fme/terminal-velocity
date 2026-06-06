@@ -163,30 +163,33 @@ periods by running `--at` twice and reading the cockpits side by side.
 
 ```
 src/
-  main.rs       CLI entry, arg parsing, dispatch
-  git.rs        git plumbing (log --numstat now; blame-at-death + cache: TODO)
+  main.rs       CLI entry, arg parsing, --at anchor resolution, dispatch
+  git.rs        git plumbing: log --numstat, blame-at-death, HEAD-keyed cache
   model.rs      domain + presentation types (Commit, Card, Cockpit, Intent)
-  intent.rs     heuristic intent classifier (keyword + diff-shape)
+  intent.rs     heuristic intent classifier (keyword + diff-shape; the API seam)
   survival.rs   Kaplan-Meier survival + half-life (the self-calibrating yardstick)
   spark.rs      sparklines, percentile-against-own-history, median
-  metrics.rs    build the cockpit (batch/cadence/net live; flow/thrash pending)
+  metrics.rs    build the cockpit + thrash tree + hotspots (all live)
   verdict.rs    deterministic verdict composer (rule-based, offline)
+  style.rs      zero-dep ANSI palette (NO_COLOR / --no-color aware)
   render.rs     terminal cockpit (default) + HTML report (--report)
 ```
 
-## Roadmap
+## What's next
 
-1. **Blame-at-death + incremental cache** (`git.rs`) — ages each deleted line by
-   blaming its range in the parent (`-w`); file add/delete balance splits
-   deletions into **thrash** (rewrite, censored for survival) vs **excision**
-   (true death, the KM event). Cache death-records keyed by HEAD sha; only blame
-   new commits. Wires up flow / thrash / excision / half-life.
-2. **`tv hotspots`** — churn × complexity by area (the highest-value drill-down).
-3. **HTML report** — the 6-panel time-series view, topped with the verdict.
-4. **Semantic line-matching** — separate true deaths from migrations/rewrites
-   (the line-survival research's rigor bar) for cleaner thrash.
-5. **Intent classifier API seam** — swap the heuristic for a learned classifier
-   to sharpen the prose-message cases (optional, never required).
+The core is live — survival, thrash/excision, hotspots, cadence, the cockpit, the
+HTML report, multi-repo aggregation, `--me`, and `--at` archaeology all ship
+today. Still open:
+
+1. **True incremental cache** (`git.rs`) — a new commit currently triggers a full
+   blame-at-death pass (tens of seconds on a large repo). Blame only the new
+   commits and their changed-file survivors, so post-commit runs stay
+   git-status-fast.
+2. **Semantic line-matching** — separate true deaths from migrations/rewrites
+   (the line-survival research's rigor bar) for a cleaner thrash/excision split.
+3. **Intent classifier seam** — swap the keyword heuristic in `intent.rs` for a
+   learned classifier via an external call, to sharpen the prose messages.
+   Optional by design: `tv` always runs fully without it.
 
 ## Lineage
 
@@ -197,6 +200,76 @@ predicts future fix activity beyond raw churn. Field-scanned against DORA / SPAC
 / DX Core 4, LinearB, CodeScene, Swarmia, and the line-survival research before
 committing to this shape.
 
+## What these methods are based on
+
+`tv` is an engineering tool, not a research project, but every signal it computes
+has a basis in the literature. What each idea draws on:
+
+**Line-survival as the yardstick.** Lifetimes are estimated with the Kaplan–Meier
+product-limit estimator, right-censored at the anchor commit — Kaplan & Meier,
+*Nonparametric Estimation from Incomplete Observations*, JASA 1958
+([doi](https://doi.org/10.1080/01621459.1958.10501452)). Applying survival
+analysis at line granularity — and the finding that **repository identity
+dominates** line survival (a gamma-frailty effect outweighing every structural
+covariate), which is exactly why `tv` fits `S(age)` *per repo* rather than
+pooling — is Gurov, *Code Lifespan Survival Analysis (CLSA)*, arXiv:2606.04993,
+2026 ([abs](https://arxiv.org/abs/2606.04993)). That code ages and decays in the
+first place is the long-standing result of Eick, Graves, Karr, Marron & Mockus,
+*Does Code Decay?*, IEEE TSE 2001 ([doi](https://doi.org/10.1109/32.895984)).
+
+**Thrash as a risk signal.** Reporting rewrite as a *share* of churn (not absolute
+volume) follows Nagappan & Ball, *Use of Relative Code Churn Measures to Predict
+System Defect Density*, ICSE 2005
+([doi](https://doi.org/10.1145/1062455.1062514)) — relative churn predicts defect
+density where absolute counts don't.
+
+**Hotspots = complexity × change.** Ranking files by change-frequency ×
+complexity, and the broader "behavioral code analysis" framing, is Adam Tornhill's
+*Your Code as a Crime Scene* (Pragmatic Bookshelf, 2015) and *Software Design
+X-Rays* (2018), built into [CodeScene](https://codescene.com). The cheap
+complexity proxy — indentation depth — is Hindle, Godfrey & Holt, *Reading Beside
+the Lines: Indentation as a Proxy for Complexity Metrics*, ICPC 2008
+([doi](https://doi.org/10.1109/ICPC.2008.13)).
+
+**The "vital few" drill-in cut.** Showing the folders/files that carry ~80% of the
+heat (Pareto / cumulative-share) instead of an arbitrary top-N rests on the
+defect-clustering result — ~80% of defects come from ~20% of modules — Boehm &
+Basili, *Software Defect Reduction Top 10 List*, IEEE Computer 2001
+([doi](https://doi.org/10.1109/2.962984)); see also Ostrand, Weyuker & Bell,
+*Predicting the Location and Number of Faults in Large Software Systems*, IEEE TSE
+2005 ([doi](https://doi.org/10.1109/TSE.2005.49)).
+
+**Batch size and flow.** Treating lines/commit as batch size, and "smaller batches
+flow faster," is Reinertsen, *The Principles of Product Development Flow*
+(Celeritas, 2009), echoed by DORA's
+[working-in-small-batches](https://dora.dev/capabilities/working-in-small-batches/)
+capability.
+
+**What `tv` deliberately is *not*.** Delivery outcomes — deploys, lead time, change
+failure rate — belong to DORA, not git history: Forsgren, Humble & Kim,
+*Accelerate* (IT Revolution, 2018). That productivity is multidimensional and must
+not be collapsed into a single per-developer number is the explicit warning of
+Forsgren, Storey, Maddila, Zimmermann, Houck & Butler, *The SPACE of Developer
+Productivity*, ACM Queue 2021 ([doi](https://doi.org/10.1145/3454122.3454124)),
+reinforced by Beck & Orosz's
+[response to McKinsey](https://newsletter.pragmaticengineer.com/p/measuring-developer-productivity-part-2)
+(2023) — together the basis for the **aggregate-by-subsystem-never-by-person**
+rule. For current DevEx measurement framing, see DX's
+[DX Core 4](https://getdx.com/news/introducing-the-dx-core-4/) (2024).
+
 ## License
 
-MIT OR Apache-2.0 (license files TBD).
+Licensed under either of
+
+ * Apache License, Version 2.0
+   ([LICENSE-APACHE](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+ * MIT license
+   ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+
+at your option.
+
+## Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.

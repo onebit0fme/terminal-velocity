@@ -1,4 +1,9 @@
+# Build output
 /target
-Cargo.lock        # this is a binary/CLI; lock is fine to commit later, ignored for now
-tv-report.html    # generated HTML report
-.tv-cache         # incremental death-record cache (per-repo, regenerable)
+
+# Generated HTML report (`tv report` / `--report`)
+tv-report.html
+
+# Cargo.lock is committed: this is a binary/CLI, so the lock is deliberately tracked.
+# The blame-at-death cache lives inside .git (<gitdir>/tv-cache), so it is never in
+# the working tree and needs no ignore rule.

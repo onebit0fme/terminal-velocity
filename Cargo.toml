@@ -14,11 +14,10 @@ categories = ["command-line-utilities", "development-tools"]
 name = "tv"
 path = "src/main.rs"
 
-# Intentionally zero dependencies for now: the scaffold is std-only so it builds
-# offline with nothing to fetch. Planned, as the tool grows:
-#   clap         — argument parsing (replacing the hand-rolled parser)
-#   serde + bincode/json — incremental death-record cache, keyed by HEAD sha
-#   owo-colors   — TTY color (auto-disabled when piped)
+# Zero runtime dependencies, by design — std-only, so it builds offline with
+# nothing to fetch (see CLAUDE.md). Arg parsing and ANSI color are hand-rolled
+# and stay that way. The only dependency we'd ever consider is serde, and only if
+# the HEAD-keyed cache outgrows its hand-written text format.
 [dependencies]
 
 [profile.release]
