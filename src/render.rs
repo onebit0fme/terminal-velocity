@@ -59,7 +59,7 @@ pub fn print_cockpit(c: &Cockpit, p: &Palette) {
     println!("{dim_rule}");
 
     if !c.survival.is_empty() {
-        print_survival(&c.survival, p);
+        print_survival(&c.survival, c.personal, p);
         println!("{dim_rule}");
     }
 
@@ -89,7 +89,7 @@ fn print_card(card: &Card, p: &Palette) {
 /// The survival curve(s) — S(age) — that weight every thrash/excision, surfaced
 /// right under the verdict. One repo: curve + half-life + alive%, with a one-line
 /// gloss. Several: one compact row per repo (S is fit per repo).
-fn print_survival(survivals: &[RepoSurvival], p: &Palette) {
+fn print_survival(survivals: &[RepoSurvival], personal: bool, p: &Palette) {
     // Downsample to a tidy 16-char sparkline (the stored curve is finer for HTML).
     let spark = |c: &[f64]| -> String {
         if c.len() < 2 {
@@ -104,29 +104,37 @@ fn print_survival(survivals: &[RepoSurvival], p: &Palette) {
             .collect();
         sparkline(&ds)
     };
+    let title = if personal {
+        "my code survival"
+    } else {
+        "code survival"
+    };
 
     if survivals.len() == 1 {
         let s = &survivals[0];
         println!(
             "{}  {}  half-life {} · {}",
-            p.bold("code survival"),
+            p.bold(title),
             spark(&s.curve),
             p.bold(&s.half_life),
             p.dim(&format!("{:.0}% of lines still alive", s.alive_pct)),
         );
-        for line in wrap(
+        let gloss = if personal {
+            "how long the lines you write survive (S(age) over your own code)."
+        } else {
             "S(age) = a deleted line's odds of having lived this long; \
-             thrash and excision weight every death by it.",
-            WIDTH - 2,
-        ) {
+             thrash and excision weight every death by it."
+        };
+        for line in wrap(gloss, WIDTH - 2) {
             println!("{}", p.dim(&format!("  {line}")));
         }
     } else {
-        println!(
-            "{} {}",
-            p.bold("code survival"),
-            p.dim("· S(age) weights every thrash & excision · fit per repo")
-        );
+        let tag = if personal {
+            "· how long the lines you write survive · per repo"
+        } else {
+            "· S(age) weights every thrash & excision · fit per repo"
+        };
+        println!("{} {}", p.bold(title), p.dim(tag));
         for s in survivals {
             println!(
                 "  {} {}  {} · {}",
@@ -614,9 +622,21 @@ pub fn write_report(
         "Changed often AND deeply nested — the highest-ROI refactor targets · {window}. \
          Nx = commits that touched the file · cx = nesting complexity."
     );
-    let surv_sub = "Every deleted line is weighted by S(age) — its odds of having lived \
-        this long, read off the repo's own line-lifetime curve. The dashed line is 50%; \
-        where the curve crosses it is the half-life. Fit per repo.";
+    let (surv_h2, surv_sub) = if c.personal {
+        (
+            "my code survival — S(age)",
+            "How long the lines you write survive — your own line-lifetime curve. The dashed \
+             line is 50%; where the curve crosses it is the half-life you'd expect of your code. \
+             Fit per repo.",
+        )
+    } else {
+        (
+            "code survival — S(age)",
+            "Every deleted line is weighted by S(age) — its odds of having lived this long, read \
+             off the repo's own line-lifetime curve. The dashed line is 50%; where the curve \
+             crosses it is the half-life. Fit per repo.",
+        )
+    };
     let cad_sub = format!(
         "When commits land, by weekday and hour ({}, all history). \
          Darker = busier; peak {} {:02}:00.",
@@ -632,7 +652,7 @@ pub fn write_report(
 <body><main class=wrap>\
 <header><h1>terminal velocity</h1><div class=meta>{branch} · {window_lbl}</div></header>\
 <section class=\"verdict {mood}\">{verdict}</section>\
-<section class=section><h2>code survival — S(age)</h2>\
+<section class=section><h2>{surv_h2}</h2>\
 <p class=sub>{surv_sub}</p><div class=panel>{survival}</div></section>\
 <section class=grid>{cards}</section>\
 <section class=section><h2>cadence — when commits land</h2>\
@@ -651,6 +671,7 @@ against this repo's own history, not external benchmarks.</div></footer>\
         footer = esc(&c.footer),
         thr_sub = esc(&thr_sub),
         hot_sub = esc(&hot_sub),
+        surv_h2 = esc(surv_h2),
         surv_sub = esc(surv_sub),
         cad_sub = esc(&cad_sub),
         survival = report_survival(&c.survival),

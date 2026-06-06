@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::intent;
-use crate::model::Commit;
+use crate::model::{Commit, Me};
 
 const REC: char = '\u{1e}'; // ASCII record separator
 const FLD: char = '\u{1f}'; // ASCII unit separator
@@ -47,7 +47,7 @@ pub fn current_branch(repo: &str) -> Result<String, String> {
 
 /// All non-merge commits with per-file numstat, newest first. Fast.
 pub fn load_commits(repo: &str) -> Result<Vec<Commit>, String> {
-    let fmt = format!("--pretty=format:{REC}%H{FLD}%ct{FLD}%s");
+    let fmt = format!("--pretty=format:{REC}%H{FLD}%ct{FLD}%ae{FLD}%an{FLD}%s");
     let out = git(
         repo,
         &[
@@ -70,6 +70,8 @@ pub fn load_commits(repo: &str) -> Result<Vec<Commit>, String> {
         let mut h = header.split(FLD);
         let sha = h.next().unwrap_or("").to_string();
         let ts: i64 = h.next().unwrap_or("0").trim().parse().unwrap_or(0);
+        let author_email = h.next().unwrap_or("").to_string();
+        let author_name = h.next().unwrap_or("").to_string();
         let subject = h.next().unwrap_or("").to_string();
 
         let mut added = 0_i64;
@@ -99,6 +101,8 @@ pub fn load_commits(repo: &str) -> Result<Vec<Commit>, String> {
             sha,
             ts,
             subject,
+            author_email,
+            author_name,
             added,
             deleted,
             files,
@@ -114,15 +118,20 @@ pub fn load_commits(repo: &str) -> Result<Vec<Commit>, String> {
 
 /// One line-death: its age (commit clock + wall clock) and how rewrite-like the
 /// killing edit was (1 = in-place rewrite/thrash, 0 = wholesale excision).
+/// `kill_a`/`intro_a` index `Collection::authors` (-1 = unknown) — `kill_a` is who
+/// deleted the line (the `--me` thrash lens), `intro_a` who wrote it (survival lens).
 pub struct DeathRecord {
     pub age_c: f64,
     pub age_t: f64,
     pub rw: f64,
     pub kill_ts: i64,
     pub path: String,
+    pub kill_a: i32,
+    pub intro_a: i32,
 }
 
-/// Everything the survival metrics need. `cens_*` are survivors alive at HEAD.
+/// Everything the survival metrics need. `cens_*` are survivors alive at HEAD;
+/// `cens_a` is each survivor's introducing author (index into `authors`, -1 unknown).
 /// One per repo — never merged across repos, so each repo's KM curve stays its
 /// own (repo frailty differs; a pooled curve would misweight every repo).
 pub struct Collection {
@@ -130,6 +139,37 @@ pub struct Collection {
     pub deaths: Vec<DeathRecord>,
     pub cens_c: Vec<f64>,
     pub cens_t: Vec<f64>,
+    pub cens_a: Vec<i32>,
+    pub authors: Vec<(String, String)>, // (email lowercased, name) by index
+}
+
+impl Collection {
+    /// Mask over `authors`: true where the author is the running user (`--me`).
+    pub fn author_mask(&self, me: &Me) -> Vec<bool> {
+        self.authors
+            .iter()
+            .map(|(email, name)| {
+                email.eq_ignore_ascii_case(&me.email)
+                    || (!me.name.is_empty() && name.eq_ignore_ascii_case(&me.name))
+            })
+            .collect()
+    }
+}
+
+/// The running user's git identity for `--me`, from `git config`. None if unset.
+pub fn whoami(repo: &str) -> Option<Me> {
+    let email = git(repo, &["config", "user.email"])
+        .ok()?
+        .trim()
+        .to_string();
+    let name = git(repo, &["config", "user.name"])
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if email.is_empty() && name.is_empty() {
+        return None;
+    }
+    Some(Me { email, name })
 }
 
 fn is_sha(s: &str) -> bool {
@@ -263,6 +303,21 @@ fn collect(repo: &str, commits: &[Commit], head: &str) -> Result<Collection, Str
     let (index, head_idx, head_ts) = commit_index(repo)?;
     let total = commits.len();
 
+    // Author table: intern commit authors so deaths/survivors can be attributed
+    // by index (compact in the cache). sha -> author index for the introducers.
+    let mut authors: Vec<(String, String)> = Vec::new();
+    let mut email_idx: HashMap<String, i32> = HashMap::new();
+    let mut sha_aidx: HashMap<&str, i32> = HashMap::new();
+    for c in commits {
+        let el = c.author_email.to_lowercase();
+        let idx = *email_idx.entry(el.clone()).or_insert_with(|| {
+            authors.push((el.clone(), c.author_name.clone()));
+            (authors.len() - 1) as i32
+        });
+        sha_aidx.insert(c.sha.as_str(), idx);
+    }
+    let intro_of = |isha: &str| -> i32 { sha_aidx.get(isha).copied().unwrap_or(-1) };
+
     let mut deaths = Vec::new();
     for (k, c) in commits.iter().enumerate() {
         if k % 50 == 0 {
@@ -275,6 +330,7 @@ fn collect(repo: &str, commits: &[Commit], head: &str) -> Result<Collection, Str
         let Some(&kill_idx) = index.get(&c.sha) else {
             continue;
         };
+        let kill_a = sha_aidx.get(c.sha.as_str()).copied().unwrap_or(-1);
         let parent = format!("{}^", c.sha);
         for (path, (dels, adds)) in file_churn(repo, &c.sha) {
             if dels.is_empty() {
@@ -298,6 +354,8 @@ fn collect(repo: &str, commits: &[Commit], head: &str) -> Result<Collection, Str
                         rw,
                         kill_ts: c.ts,
                         path: path.clone(),
+                        kill_a,
+                        intro_a: intro_of(isha),
                     });
                 }
             }
@@ -313,6 +371,7 @@ fn collect(repo: &str, commits: &[Commit], head: &str) -> Result<Collection, Str
     let ftotal = flist.len();
     let mut cens_c = Vec::new();
     let mut cens_t = Vec::new();
+    let mut cens_a = Vec::new();
     for (k, path) in flist.iter().enumerate() {
         if k % 100 == 0 {
             eprint!("\r  survivors {k}/{ftotal}");
@@ -322,6 +381,7 @@ fn collect(repo: &str, commits: &[Commit], head: &str) -> Result<Collection, Str
             if let Some(&iidx) = index.get(&isha) {
                 cens_c.push((head_idx - iidx) as f64);
                 cens_t.push((head_ts - its) as f64 / 86400.0);
+                cens_a.push(intro_of(&isha));
             }
         }
     }
@@ -332,6 +392,8 @@ fn collect(repo: &str, commits: &[Commit], head: &str) -> Result<Collection, Str
         deaths,
         cens_c,
         cens_t,
+        cens_a,
+        authors,
     })
 }
 
@@ -360,26 +422,32 @@ fn cache_file(repo: &str) -> Option<PathBuf> {
 fn load_cache(path: &Path, head: &str) -> Option<Collection> {
     let data = std::fs::read_to_string(path).ok()?;
     let mut lines = data.lines();
-    let cached_head = lines.next()?.strip_prefix("TVCACHE2 ")?;
+    let cached_head = lines.next()?.strip_prefix("TVCACHE3 ")?;
     if cached_head != head {
         return None;
     }
+    let mut authors = Vec::new();
     let mut deaths = Vec::new();
     let mut cens_c = Vec::new();
     let mut cens_t = Vec::new();
+    let mut cens_a = Vec::new();
     for line in lines {
         let mut t = line.split('\t');
         match t.next() {
+            Some("A") => authors.push((t.next()?.to_string(), t.next().unwrap_or("").to_string())),
             Some("D") => deaths.push(DeathRecord {
                 age_c: t.next()?.parse().ok()?,
                 age_t: t.next()?.parse().ok()?,
                 rw: t.next()?.parse().ok()?,
                 kill_ts: t.next()?.parse().ok()?,
+                kill_a: t.next()?.parse().ok()?,
+                intro_a: t.next()?.parse().ok()?,
                 path: t.next()?.to_string(),
             }),
             Some("C") => {
                 cens_c.push(t.next()?.parse().ok()?);
                 cens_t.push(t.next()?.parse().ok()?);
+                cens_a.push(t.next()?.parse().ok()?);
             }
             _ => {}
         }
@@ -389,19 +457,24 @@ fn load_cache(path: &Path, head: &str) -> Option<Collection> {
         deaths,
         cens_c,
         cens_t,
+        cens_a,
+        authors,
     })
 }
 
 fn save_cache(path: &Path, col: &Collection) -> std::io::Result<()> {
-    let mut s = format!("TVCACHE2 {}\n", col.head);
+    let mut s = format!("TVCACHE3 {}\n", col.head);
+    for (email, name) in &col.authors {
+        s.push_str(&format!("A\t{email}\t{name}\n"));
+    }
     for d in &col.deaths {
         s.push_str(&format!(
-            "D\t{}\t{}\t{}\t{}\t{}\n",
-            d.age_c, d.age_t, d.rw, d.kill_ts, d.path
+            "D\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            d.age_c, d.age_t, d.rw, d.kill_ts, d.kill_a, d.intro_a, d.path
         ));
     }
-    for (c, t) in col.cens_c.iter().zip(col.cens_t.iter()) {
-        s.push_str(&format!("C\t{c}\t{t}\n"));
+    for ((c, t), a) in col.cens_c.iter().zip(&col.cens_t).zip(&col.cens_a) {
+        s.push_str(&format!("C\t{c}\t{t}\t{a}\n"));
     }
     std::fs::write(path, s)
 }
@@ -414,9 +487,35 @@ pub fn latest_ts(repo: &str) -> Result<i64, String> {
         .map_err(|_| "no commits".to_string())
 }
 
+/// git regex metachar escape, so an email/name `--author` pattern matches literally.
+fn re_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for ch in s.chars() {
+        if "\\.^$*+?()[]{}|".contains(ch) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// `--author=<pat>` for each identity (OR-matched by git). Used for `--me`.
+fn author_args(authors: &[String]) -> Vec<String> {
+    authors
+        .iter()
+        .filter(|a| !a.is_empty())
+        .map(|a| format!("--author={}", re_escape(a)))
+        .collect()
+}
+
 /// Churn (added+deleted) per path. `since` (unix ts) windows it to recent
-/// commits; None = all history.
-pub fn file_churn_totals(repo: &str, since: Option<i64>) -> Result<HashMap<String, i64>, String> {
+/// commits; None = all history. `authors` (if non-empty) restricts to those
+/// commit authors (`--me`).
+pub fn file_churn_totals(
+    repo: &str,
+    since: Option<i64>,
+    authors: &[String],
+) -> Result<HashMap<String, i64>, String> {
     let mut args: Vec<String> = vec![
         "log".into(),
         "--no-merges".into(),
@@ -426,6 +525,7 @@ pub fn file_churn_totals(repo: &str, since: Option<i64>) -> Result<HashMap<Strin
     if let Some(ts) = since {
         args.push(format!("--since=@{ts}"));
     }
+    args.extend(author_args(authors));
     let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = git(repo, &argrefs)?;
     let mut m: HashMap<String, i64> = HashMap::new();
@@ -449,7 +549,12 @@ pub fn file_churn_totals(repo: &str, since: Option<i64>) -> Result<HashMap<Strin
 
 /// Change frequency: how many (windowed) commits touched each path. The standard
 /// hotspot "change" axis — "edited often" — far less size-skewed than line churn.
-pub fn file_change_freq(repo: &str, since: Option<i64>) -> Result<HashMap<String, i64>, String> {
+/// `authors` (if non-empty) restricts to those commit authors (`--me`).
+pub fn file_change_freq(
+    repo: &str,
+    since: Option<i64>,
+    authors: &[String],
+) -> Result<HashMap<String, i64>, String> {
     let mut args: Vec<String> = vec![
         "log".into(),
         "--no-merges".into(),
@@ -459,6 +564,7 @@ pub fn file_change_freq(repo: &str, since: Option<i64>) -> Result<HashMap<String
     if let Some(ts) = since {
         args.push(format!("--since=@{ts}"));
     }
+    args.extend(author_args(authors));
     let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = git(repo, &argrefs)?;
     let mut m: HashMap<String, i64> = HashMap::new();

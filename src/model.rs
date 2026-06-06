@@ -37,6 +37,8 @@ pub struct Commit {
     pub sha: String,
     pub ts: i64, // committer time, unix epoch seconds
     pub subject: String,
+    pub author_email: String,
+    pub author_name: String,
     pub added: i64,
     pub deleted: i64,
     pub files: Vec<String>,
@@ -47,6 +49,21 @@ impl Commit {
     pub fn churn(&self) -> i64 {
         self.added + self.deleted
     }
+
+    /// Whether this commit is the running user's, by email or name (case-insensitive).
+    /// Name is a fallback so email drift (work laptop, noreply addresses) still matches.
+    pub fn by(&self, me: &Me) -> bool {
+        self.author_email.eq_ignore_ascii_case(&me.email)
+            || (!me.name.is_empty() && self.author_name.eq_ignore_ascii_case(&me.name))
+    }
+}
+
+/// The running user's git identity, for `--me`. Self-instrumentation only — there
+/// is deliberately no `--author=<someone-else>` (that would be the surveillance line).
+#[derive(Clone, Debug)]
+pub struct Me {
+    pub email: String,
+    pub name: String,
 }
 
 /// Semantic severity of a card, independent of the state word (e.g. batch
@@ -125,6 +142,8 @@ pub struct Cockpit {
     /// The survival curve(s) — S(age) — that weight thrash/excision. Shown right
     /// under the verdict so the rest of the board has a foundation.
     pub survival: Vec<RepoSurvival>,
+    /// `--me`: the board is scoped to the running user (changes survival wording).
+    pub personal: bool,
     pub cards: Vec<Card>,
     pub footer: String,
     /// Weeks of history available; drives the coverage-honesty rule.

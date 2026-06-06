@@ -39,6 +39,7 @@ struct Config {
     report: bool,
     color_off: bool,
     all_time: bool,
+    me: bool,
 }
 
 /// Default window for the drill-down commands — matches the cockpit's trailing
@@ -132,6 +133,7 @@ fn parse_args() -> Result<Config, String> {
     let mut report = false;
     let mut color_off = false;
     let mut all_time = false;
+    let mut me = false;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -146,6 +148,7 @@ fn parse_args() -> Result<Config, String> {
             "--report" => report = true,
             "--no-color" => color_off = true,
             "--all" => all_time = true,
+            "--me" => me = true,
             "--repo" => repos.push(it.next().ok_or("--repo requires a path")?),
             "status" => command = Command::Status,
             "thrash" => command = Command::Thrash,
@@ -165,6 +168,7 @@ fn parse_args() -> Result<Config, String> {
         report,
         color_off,
         all_time,
+        me,
     })
 }
 
@@ -190,6 +194,8 @@ OPTIONS:
     --report        shorthand for the `report` command (works with any command)
     --no-color      disable color (also respects NO_COLOR)
     --all           thrash/hotspots over all history (default: last 8 weeks)
+    --me            only my own commits (from git config); my rework + how long
+                    the code I write survives. Self only — no per-teammate view.
     -h, --help      show this help
     -V, --version   show version
 "
@@ -197,14 +203,16 @@ OPTIONS:
 }
 
 /// Per-repo (label, change-frequency, complexity) — the hotspots inputs.
+/// `authors` (non-empty under `--me`) restricts the change counts to my commits.
 fn repo_files(
     repos: &[String],
     labels: &[String],
     since: Option<i64>,
+    authors: &[String],
 ) -> Result<Vec<metrics::RepoFiles>, String> {
     let mut out = Vec::new();
     for (repo, label) in repos.iter().zip(labels) {
-        let f = git::file_change_freq(repo, since).map_err(|e| format!("{repo}: {e}"))?;
+        let f = git::file_change_freq(repo, since, authors).map_err(|e| format!("{repo}: {e}"))?;
         let c = git::file_complexity(repo).map_err(|e| format!("{repo}: {e}"))?;
         out.push((label.clone(), f, c));
     }
@@ -216,10 +224,11 @@ fn repo_churn(
     repos: &[String],
     labels: &[String],
     since: Option<i64>,
+    authors: &[String],
 ) -> Result<Vec<metrics::RepoChurn>, String> {
     let mut out = Vec::new();
     for (repo, label) in repos.iter().zip(labels) {
-        let c = git::file_churn_totals(repo, since).map_err(|e| format!("{repo}: {e}"))?;
+        let c = git::file_churn_totals(repo, since, authors).map_err(|e| format!("{repo}: {e}"))?;
         out.push((label.clone(), c));
     }
     Ok(out)
@@ -231,6 +240,42 @@ fn run(cfg: Config) -> Result<(), String> {
     let labels = repo_labels(&cfg.repos);
     // `report` command and the `--report` flag are the same thing: the full page.
     let want_report = cfg.report || matches!(cfg.command, Command::Report);
+
+    // `--me`: resolve my identity from git config (self-instrumentation only).
+    let me: Option<model::Me> = if cfg.me {
+        Some(
+            cfg.repos
+                .iter()
+                .find_map(|r| git::whoami(r))
+                .ok_or("--me needs your identity — set `git config user.email`")?,
+        )
+    } else {
+        None
+    };
+    // `--author` patterns for the log-based file metrics (git OR-matches email/name).
+    let author_pats: Vec<String> = me
+        .as_ref()
+        .map(|m| vec![m.email.clone(), m.name.clone()])
+        .unwrap_or_default();
+    let header = {
+        let s = scope_label(&cfg.repos);
+        if me.is_some() {
+            format!("{s} · me")
+        } else {
+            s
+        }
+    };
+    let keep_mine = |commits: &mut Vec<model::Commit>| {
+        if let Some(m) = &me {
+            commits.retain(|c| c.by(m));
+        }
+    };
+    let empty_err = || -> String {
+        match &me {
+            Some(m) => format!("no commits by you ({}) found in the given repo(s)", m.email),
+            None => "no non-merge commits found across the given repo(s)".into(),
+        }
+    };
 
     match cfg.command {
         Command::Explain => {
@@ -245,7 +290,7 @@ fn run(cfg: Config) -> Result<(), String> {
             } else {
                 Some(latest_ts_across(&cfg.repos)? - WINDOW_SECS)
             };
-            let per_repo = repo_files(&cfg.repos, &labels, since)?;
+            let per_repo = repo_files(&cfg.repos, &labels, since, &author_pats)?;
             let rows = metrics::hotspots(&per_repo, 12);
             render::print_hotspots(&rows, since.is_some(), multi, &palette);
             return Ok(());
@@ -256,11 +301,12 @@ fn run(cfg: Config) -> Result<(), String> {
             for repo in &cfg.repos {
                 commits.extend(git::load_commits(repo).map_err(|e| format!("{repo}: {e}"))?);
             }
+            keep_mine(&mut commits);
             if commits.is_empty() {
-                return Err("no non-merge commits found across the given repo(s)".into());
+                return Err(empty_err());
             }
             let heat = metrics::cadence_heatmap(&commits);
-            render::print_heatmap(&heat, &scope_label(&cfg.repos), &palette);
+            render::print_heatmap(&heat, &header, &palette);
             return Ok(());
         }
         _ => {}
@@ -279,10 +325,10 @@ fn run(cfg: Config) -> Result<(), String> {
         repos.push((label.clone(), col));
         commits.extend(cs);
     }
+    keep_mine(&mut commits); // activity metrics + churn denominator are my commits
     if commits.is_empty() {
-        return Err("no non-merge commits found across the given repo(s)".into());
+        return Err(empty_err());
     }
-    let header = scope_label(&cfg.repos);
 
     let anchor = commits.iter().map(|c| c.ts).max().unwrap_or(0);
     let (since, recent_cut) = if cfg.all_time {
@@ -292,10 +338,10 @@ fn run(cfg: Config) -> Result<(), String> {
     };
 
     if want_report {
-        let cockpit = metrics::build_cockpit(&commits, &repos, &header);
-        let churn = repo_churn(&cfg.repos, &labels, since)?;
-        let tree = metrics::thrash_tree(&repos, &churn, since, recent_cut, multi);
-        let rows = metrics::hotspots(&repo_files(&cfg.repos, &labels, since)?, 12);
+        let cockpit = metrics::build_cockpit(&commits, &repos, &header, me.as_ref());
+        let churn = repo_churn(&cfg.repos, &labels, since, &author_pats)?;
+        let tree = metrics::thrash_tree(&repos, &churn, since, recent_cut, multi, me.as_ref());
+        let rows = metrics::hotspots(&repo_files(&cfg.repos, &labels, since, &author_pats)?, 12);
         let heat = metrics::cadence_heatmap(&commits);
         let path = "tv-report.html";
         render::write_report(&cockpit, &tree, &rows, &heat, since.is_some(), multi, path)?;
@@ -305,12 +351,12 @@ fn run(cfg: Config) -> Result<(), String> {
 
     match cfg.command {
         Command::Status => {
-            let cockpit = metrics::build_cockpit(&commits, &repos, &header);
+            let cockpit = metrics::build_cockpit(&commits, &repos, &header, me.as_ref());
             render::print_cockpit(&cockpit, &palette);
         }
         Command::Thrash => {
-            let churn = repo_churn(&cfg.repos, &labels, since)?;
-            let tree = metrics::thrash_tree(&repos, &churn, since, recent_cut, multi);
+            let churn = repo_churn(&cfg.repos, &labels, since, &author_pats)?;
+            let tree = metrics::thrash_tree(&repos, &churn, since, recent_cut, multi, me.as_ref());
             render::print_thrash(&header, &tree, since.is_some(), &palette);
         }
         _ => unreachable!(),

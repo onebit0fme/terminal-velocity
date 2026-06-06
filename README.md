@@ -54,7 +54,9 @@ spinning") matters as much as the alarms.
 4. **Aggregate by subsystem, never by person.** The load-bearing safety rule.
    Per-developer columns turn this into the surveillance tool the whole field's
    anti-metrics consensus forbids. `thrash`/`hotspots` group by directory /
-   bounded-context, not by author.
+   bounded-context, not by author. The one sanctioned exception is `--me`:
+   **self-instrumentation** (you, from your own `git config`) — never a
+   `--author=<someone-else>`, which would be exactly that forbidden tool.
 5. **Each metric carries its action — or its "ignore."** "Batch rising → split."
    "Thrash spike → mechanical rename, ignore" vs "stabilize this area." The
    permission to ignore mechanical churn is as important as the alarm.
@@ -89,6 +91,11 @@ and shown as the curve shape, the half-life, and the still-alive fraction.
 churn × complexity; `tv cadence` draws a weekday × hour commit punchcard (when
 work lands, in local time) — all aggregate by area/time, never by author.
 
+`--me` (any command) scopes everything to your own commits, inferred from
+`git config`. Two lenses: your *rework* (thrash/excision on commits where you
+did the deleting) and your *code's durability* (the survival curve becomes how
+long the lines you write last — introducer = you). It's self-only by design.
+
 ## How it decides
 
 Run **`tv explain`** to print the full heuristic decision tree right in the
@@ -105,6 +112,7 @@ cargo build --release          # zero dependencies; builds offline
 ./target/release/tv            # cockpit for the current repo
 ./target/release/tv --repo /path/to/repo
 ./target/release/tv thrash     # or: hotspots, cadence, explain
+./target/release/tv status --me  # only my commits: my rework + how long my code lasts
 ./target/release/tv report     # all three -> one HTML page (tv-report.html)
 cargo test                     # survival-curve unit tests
 ```

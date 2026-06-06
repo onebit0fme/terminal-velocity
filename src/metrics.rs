@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::git::Collection;
-use crate::model::{Card, Cockpit, Commit, Heatmap, RepoSurvival, Tone};
+use crate::model::{Card, Cockpit, Commit, Heatmap, Me, RepoSurvival, Tone};
 use crate::spark::{median, percentile_rank, sparkline};
 use crate::survival::{half_life, km_survival, sample_survival, survival_at};
 use crate::verdict::{self, Signals};
@@ -71,7 +71,12 @@ fn tz_label(offset: Option<i64>) -> String {
     }
 }
 
-pub fn build_cockpit(commits: &[Commit], repos: &[(String, Collection)], branch: &str) -> Cockpit {
+pub fn build_cockpit(
+    commits: &[Commit],
+    repos: &[(String, Collection)],
+    branch: &str,
+    me: Option<&Me>,
+) -> Cockpit {
     let anchor = commits.iter().map(|c| c.ts).max().unwrap_or(0);
     let min_ts = commits.iter().map(|c| c.ts).min().unwrap_or(anchor);
     let coverage_weeks = ((anchor - min_ts).div_euclid(WEEK) + 1).max(1) as usize;
@@ -96,11 +101,18 @@ pub fn build_cockpit(commits: &[Commit], repos: &[(String, Collection)], branch:
     let mut exc_wk: BTreeMap<i64, f64> = BTreeMap::new();
     let mut survival: Vec<RepoSurvival> = Vec::new();
     for (label, col) in repos {
+        // `--me`: keep only deaths I caused (kill_a) for thrash; survival switches
+        // to my-authored lines (intro_a). The weighting curve stays the repo's
+        // full population — the calibration of how surprising a death at this age is.
+        let mask = me.map(|m| col.author_mask(m));
         let ev_c: Vec<f64> = col.deaths.iter().map(|d| d.age_c).collect();
-        let ev_t: Vec<f64> = col.deaths.iter().map(|d| d.age_t).collect();
         let (tc, sc) = km_survival(&ev_c, &col.cens_c);
-        let (tt, st) = km_survival(&ev_t, &col.cens_t);
         for d in &col.deaths {
+            if let Some(m) = &mask {
+                if !(d.kill_a >= 0 && m[d.kill_a as usize]) {
+                    continue;
+                }
+            }
             let w = survival_at(&tc, &sc, d.age_c);
             let wk = week_bucket(d.kill_ts, anchor);
             thr_tot += w * d.rw;
@@ -108,19 +120,7 @@ pub fn build_cockpit(commits: &[Commit], repos: &[(String, Collection)], branch:
             *thr_wk.entry(wk).or_default() += w * d.rw;
             *exc_wk.entry(wk).or_default() += w * (1.0 - d.rw);
         }
-        let max_age = ev_c.iter().copied().fold(0.0_f64, f64::max);
-        let alive = col.cens_c.len() as f64;
-        let total = alive + col.deaths.len() as f64;
-        survival.push(RepoSurvival {
-            label: label.clone(),
-            curve: sample_survival(&tc, &sc, 24, max_age),
-            half_life: half_life_str(half_life(&tc, &sc), half_life(&tt, &st)),
-            alive_pct: if total > 0.0 {
-                alive / total * 100.0
-            } else {
-                0.0
-            },
-        });
+        survival.push(survival_row(label, col, mask.as_deref()));
     }
     let thr_pct = thr_tot / total_churn * 100.0;
     let exc_pct = exc_tot / total_churn * 100.0;
@@ -164,6 +164,7 @@ pub fn build_cockpit(commits: &[Commit], repos: &[(String, Collection)], branch:
         window: "last 7d vs trailing 8wk".to_string(),
         verdict,
         survival,
+        personal: me.is_some(),
         cards,
         footer,
         coverage_weeks,
@@ -208,6 +209,57 @@ pub fn cadence_heatmap(commits: &[Commit]) -> Heatmap {
         tz: tz_label(tz),
         weekend_pct: weekend as f64 / denom * 100.0,
         night_pct: night as f64 / denom * 100.0,
+    }
+}
+
+/// One repo's survival row. `mask` None → the whole repo's curve; Some → only the
+/// lines the running user introduced (`--me`: "how long the code I write lasts").
+fn survival_row(label: &str, col: &Collection, mask: Option<&[bool]>) -> RepoSurvival {
+    let mine = |a: i32| a >= 0 && mask.is_some_and(|m| m[a as usize]);
+    let (ev_c, ev_t, cens_c, cens_t): (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) = if mask.is_none() {
+        (
+            col.deaths.iter().map(|d| d.age_c).collect(),
+            col.deaths.iter().map(|d| d.age_t).collect(),
+            col.cens_c.clone(),
+            col.cens_t.clone(),
+        )
+    } else {
+        let ev_c = col
+            .deaths
+            .iter()
+            .filter(|d| mine(d.intro_a))
+            .map(|d| d.age_c)
+            .collect();
+        let ev_t = col
+            .deaths
+            .iter()
+            .filter(|d| mine(d.intro_a))
+            .map(|d| d.age_t)
+            .collect();
+        let mut cc = Vec::new();
+        let mut ct = Vec::new();
+        for ((c, t), a) in col.cens_c.iter().zip(&col.cens_t).zip(&col.cens_a) {
+            if mine(*a) {
+                cc.push(*c);
+                ct.push(*t);
+            }
+        }
+        (ev_c, ev_t, cc, ct)
+    };
+    let (tc, sc) = km_survival(&ev_c, &cens_c);
+    let (tt, st) = km_survival(&ev_t, &cens_t);
+    let max_age = ev_c.iter().copied().fold(0.0_f64, f64::max);
+    let alive = cens_c.len() as f64;
+    let total = alive + ev_c.len() as f64;
+    RepoSurvival {
+        label: label.to_string(),
+        curve: sample_survival(&tc, &sc, 24, max_age),
+        half_life: half_life_str(half_life(&tc, &sc), half_life(&tt, &st)),
+        alive_pct: if total > 0.0 {
+            alive / total * 100.0
+        } else {
+            0.0
+        },
     }
 }
 
@@ -541,14 +593,21 @@ pub fn thrash_tree(
     since: Option<i64>,
     recent_cut: Option<i64>,
     multi: bool,
+    me: Option<&Me>,
 ) -> TreeNode {
     let mut root = TreeNode::default();
     for (label, col) in repos {
+        let mask = me.map(|m| col.author_mask(m));
         let ev_c: Vec<f64> = col.deaths.iter().map(|d| d.age_c).collect();
-        let (tc, sc) = km_survival(&ev_c, &col.cens_c); // per-repo S
+        let (tc, sc) = km_survival(&ev_c, &col.cens_c); // per-repo S (full calibration)
         for d in &col.deaths {
             if since.is_some_and(|cut| d.kill_ts < cut) {
                 continue; // only aggregate rewrites inside the window
+            }
+            if let Some(m) = &mask {
+                if !(d.kill_a >= 0 && m[d.kill_a as usize]) {
+                    continue; // --me: only rework I did
+                }
             }
             let w = survival_at(&tc, &sc, d.age_c);
             let t = w * d.rw;
