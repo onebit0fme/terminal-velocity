@@ -71,7 +71,7 @@ fn tz_label(offset: Option<i64>) -> String {
     }
 }
 
-pub fn build_cockpit(commits: &[Commit], col: &Collection, branch: &str) -> Cockpit {
+pub fn build_cockpit(commits: &[Commit], repos: &[(String, Collection)], branch: &str) -> Cockpit {
     let anchor = commits.iter().map(|c| c.ts).max().unwrap_or(0);
     let min_ts = commits.iter().map(|c| c.ts).min().unwrap_or(anchor);
     let coverage_weeks = ((anchor - min_ts).div_euclid(WEEK) + 1).max(1) as usize;
@@ -87,24 +87,30 @@ pub fn build_cockpit(commits: &[Commit], col: &Collection, branch: &str) -> Cock
         .sum::<f64>()
         .max(1.0);
 
-    // survival: commit clock drives thrash weighting + half-life; wall clock for display
-    let ev_c: Vec<f64> = col.deaths.iter().map(|d| d.age_c).collect();
-    let ev_t: Vec<f64> = col.deaths.iter().map(|d| d.age_t).collect();
-    let (tc, sc) = km_survival(&ev_c, &col.cens_c);
-    let (tt, st) = km_survival(&ev_t, &col.cens_t);
-
-    // thrash (in-place rewrite) vs excision (scope cut), total + weekly
+    // Survival is fit PER REPO and the weighted rework summed — never a pooled
+    // curve (repo frailty differs). Commit clock drives weighting + half-life;
+    // wall clock for the days half-life. Half-lives are summarized across repos.
     let mut thr_tot = 0.0;
     let mut exc_tot = 0.0;
     let mut thr_wk: BTreeMap<i64, f64> = BTreeMap::new();
     let mut exc_wk: BTreeMap<i64, f64> = BTreeMap::new();
-    for d in &col.deaths {
-        let w = survival_at(&tc, &sc, d.age_c);
-        let wk = week_bucket(d.kill_ts, anchor);
-        thr_tot += w * d.rw;
-        exc_tot += w * (1.0 - d.rw);
-        *thr_wk.entry(wk).or_default() += w * d.rw;
-        *exc_wk.entry(wk).or_default() += w * (1.0 - d.rw);
+    let mut hl_c: Vec<Option<f64>> = Vec::new();
+    let mut hl_d: Vec<Option<f64>> = Vec::new();
+    for (_label, col) in repos {
+        let ev_c: Vec<f64> = col.deaths.iter().map(|d| d.age_c).collect();
+        let ev_t: Vec<f64> = col.deaths.iter().map(|d| d.age_t).collect();
+        let (tc, sc) = km_survival(&ev_c, &col.cens_c);
+        let (tt, st) = km_survival(&ev_t, &col.cens_t);
+        for d in &col.deaths {
+            let w = survival_at(&tc, &sc, d.age_c);
+            let wk = week_bucket(d.kill_ts, anchor);
+            thr_tot += w * d.rw;
+            exc_tot += w * (1.0 - d.rw);
+            *thr_wk.entry(wk).or_default() += w * d.rw;
+            *exc_wk.entry(wk).or_default() += w * (1.0 - d.rw);
+        }
+        hl_c.push(half_life(&tc, &sc));
+        hl_d.push(half_life(&tt, &st));
     }
     let thr_pct = thr_tot / total_churn * 100.0;
     let exc_pct = exc_tot / total_churn * 100.0;
@@ -138,12 +144,7 @@ pub fn build_cockpit(commits: &[Commit], col: &Collection, branch: &str) -> Cock
     };
     let verdict = verdict::compose(&sig);
 
-    let hl = match (half_life(&tc, &sc), half_life(&tt, &st)) {
-        (Some(c), Some(d)) => format!("~{c:.0} commits / ~{d:.0} days"),
-        (Some(c), None) => format!("~{c:.0} commits"),
-        (None, Some(d)) => format!("~{d:.0} days"),
-        (None, None) => "not reached (>50% of lines still alive)".to_string(),
-    };
+    let hl = format_half_life(&hl_c, &hl_d, repos.len());
     let footer = format!(
         "code half-life {hl} (how long a typical line survives) · net {net:+} \
          ({added} added, {deleted} deleted) · run `tv thrash` / `tv hotspots` to drill in"
@@ -157,6 +158,40 @@ pub fn build_cockpit(commits: &[Commit], col: &Collection, branch: &str) -> Cock
         footer,
         coverage_weeks,
     }
+}
+
+/// Half-life string. One repo: the bare figure. Several: the median across
+/// their per-repo curves (so it's not a misleading pooled number), with a count
+/// of how many actually reached 50%.
+fn format_half_life(hl_c: &[Option<f64>], hl_d: &[Option<f64>], n: usize) -> String {
+    if n <= 1 {
+        let c = hl_c.first().copied().flatten();
+        let d = hl_d.first().copied().flatten();
+        return match (c, d) {
+            (Some(c), Some(d)) => format!("~{c:.0} commits / ~{d:.0} days"),
+            (Some(c), None) => format!("~{c:.0} commits"),
+            (None, Some(d)) => format!("~{d:.0} days"),
+            (None, None) => "not reached (>50% of lines still alive)".to_string(),
+        };
+    }
+    let reached = hl_c.iter().filter(|x| x.is_some()).count();
+    let tail = format!("(median of {reached}/{n} repos)");
+    match (median_opt(hl_c), median_opt(hl_d)) {
+        (Some(c), Some(d)) => format!("~{c:.0} commits / ~{d:.0} days {tail}"),
+        (Some(c), None) => format!("~{c:.0} commits {tail}"),
+        (None, Some(d)) => format!("~{d:.0} days {tail}"),
+        (None, None) => format!("not reached in any of {n} repos (>50% of lines still alive)"),
+    }
+}
+
+/// Median of the present values, ignoring `None`.
+fn median_opt(vals: &[Option<f64>]) -> Option<f64> {
+    let mut v: Vec<f64> = vals.iter().filter_map(|x| *x).collect();
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    Some(v[v.len() / 2])
 }
 
 /// Weekly throughput (total churn/week) — a steadiness pulse, self-relative.
@@ -456,45 +491,78 @@ fn insert(
     }
 }
 
+/// Prepend the repo label as the top folder segment when aggregating several.
+fn repo_segments(label: &str, path: &str, multi: bool) -> Vec<String> {
+    let segs = dir_segments(path);
+    if multi {
+        let mut v = Vec::with_capacity(segs.len() + 1);
+        v.push(label.to_string());
+        v.extend(segs);
+        v
+    } else {
+        segs
+    }
+}
+
 /// Build the folder tree of S-weighted thrash. The root holds the totals; every
-/// node holds the thrash (and churn, for the %) of its whole subtree.
+/// node holds the thrash (and churn, for the %) of its whole subtree. Each repo's
+/// rework is weighted by its OWN survival curve, and (when several) sits under a
+/// top-level node named for the repo.
 pub fn thrash_tree(
-    col: &Collection,
-    churn: &HashMap<String, i64>,
+    repos: &[(String, Collection)],
+    churn: &[RepoChurn],
     since: Option<i64>,
     recent_cut: Option<i64>,
+    multi: bool,
 ) -> TreeNode {
-    let ev_c: Vec<f64> = col.deaths.iter().map(|d| d.age_c).collect();
-    let (tc, sc) = km_survival(&ev_c, &col.cens_c); // S calibrated on all history
-
     let mut root = TreeNode::default();
-    for d in &col.deaths {
-        if since.is_some_and(|cut| d.kill_ts < cut) {
-            continue; // only aggregate rewrites inside the window
+    for (label, col) in repos {
+        let ev_c: Vec<f64> = col.deaths.iter().map(|d| d.age_c).collect();
+        let (tc, sc) = km_survival(&ev_c, &col.cens_c); // per-repo S
+        for d in &col.deaths {
+            if since.is_some_and(|cut| d.kill_ts < cut) {
+                continue; // only aggregate rewrites inside the window
+            }
+            let w = survival_at(&tc, &sc, d.age_c);
+            let t = w * d.rw;
+            let t_recent = if recent_cut.is_some_and(|rc| d.kill_ts >= rc) {
+                t
+            } else {
+                0.0
+            };
+            insert(
+                &mut root,
+                &repo_segments(label, &d.path, multi),
+                t,
+                t_recent,
+                w * (1.0 - d.rw),
+                0.0,
+            );
         }
-        let w = survival_at(&tc, &sc, d.age_c);
-        let t = w * d.rw;
-        let t_recent = if recent_cut.is_some_and(|rc| d.kill_ts >= rc) {
-            t
-        } else {
-            0.0
-        };
-        insert(
-            &mut root,
-            &dir_segments(&d.path),
-            t,
-            t_recent,
-            w * (1.0 - d.rw),
-            0.0,
-        );
     }
-    for (path, &ch) in churn {
-        insert(&mut root, &dir_segments(path), 0.0, 0.0, 0.0, ch as f64);
+    for (label, cmap) in churn {
+        for (path, &ch) in cmap {
+            insert(
+                &mut root,
+                &repo_segments(label, path, multi),
+                0.0,
+                0.0,
+                0.0,
+                ch as f64,
+            );
+        }
     }
     root
 }
 
+/// One repo's hotspot inputs: (label, change-frequency by path, complexity by path).
+pub type RepoFiles = (String, HashMap<String, i64>, HashMap<String, i64>);
+
+/// One repo's thrash denominator: (label, churn by path).
+pub type RepoChurn = (String, HashMap<String, i64>);
+
 pub struct Hotspot {
+    pub repo: String, // owning repo label (shown only when aggregating several)
     pub file: String,
     pub freq: i64, // commits touching the file in the window
     pub complexity: i64,
@@ -502,24 +570,24 @@ pub struct Hotspot {
 }
 
 /// Files ranked by change-frequency × complexity — files edited often AND deeply
-/// nested are the highest-ROI refactor targets.
-pub fn hotspots(
-    freq: &HashMap<String, i64>,
-    complexity: &HashMap<String, i64>,
-    top: usize,
-) -> Vec<Hotspot> {
-    let mut rows: Vec<Hotspot> = complexity
-        .iter()
-        .filter_map(|(file, &cx)| {
-            let f = *freq.get(file)?;
-            (f > 0 && cx > 0).then(|| Hotspot {
-                file: file.clone(),
-                freq: f,
-                complexity: cx,
-                score: f as f64 * cx as f64,
-            })
-        })
-        .collect();
+/// nested are the highest-ROI refactor targets. Ranked across all repos, but each
+/// row keeps its repo so same-named files in different repos stay distinct.
+pub fn hotspots(per_repo: &[RepoFiles], top: usize) -> Vec<Hotspot> {
+    let mut rows: Vec<Hotspot> = Vec::new();
+    for (label, freq, complexity) in per_repo {
+        for (file, &cx) in complexity {
+            let Some(&f) = freq.get(file) else { continue };
+            if f > 0 && cx > 0 {
+                rows.push(Hotspot {
+                    repo: label.clone(),
+                    file: file.clone(),
+                    freq: f,
+                    complexity: cx,
+                    score: f as f64 * cx as f64,
+                });
+            }
+        }
+    }
     rows.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)

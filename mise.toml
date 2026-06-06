@@ -21,6 +21,11 @@ run = "cargo run --"
 description = "Run tv against the current directory"
 run = "cargo run -- --repo ."
 
+[tasks.scan]
+description = "Aggregate tv across every main/master repo under a dir: mise run scan -- <root> [tv args]"
+depends = ["release"]
+run = "scripts/scan-repos.sh"
+
 [tasks.test]
 description = "Run unit tests"
 run = "cargo test"

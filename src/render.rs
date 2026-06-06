@@ -1,5 +1,6 @@
 //! Output skins. Terminal cockpit is the default (daily glance); the HTML
-//! report (`--report`) is the manager/retro skin. Both lead with the verdict.
+//! report (the `report` command / `--report`) is the manager/retro skin —
+//! cockpit + thrash + hotspots on one page. Both lead with the verdict.
 
 use std::fs;
 
@@ -246,7 +247,7 @@ fn print_branch(
     }
 }
 
-pub fn print_hotspots(rows: &[Hotspot], recent: bool, p: &Palette) {
+pub fn print_hotspots(rows: &[Hotspot], recent: bool, multi: bool, p: &Palette) {
     let window = if recent { "last 8wk" } else { "all-time" };
     println!(
         "{} {}",
@@ -275,11 +276,16 @@ pub fn print_hotspots(rows: &[Hotspot], recent: bool, p: &Palette) {
     for r in rows {
         // sqrt scaling so the list past the top file stays readable; the numbers
         // carry the real magnitude.
+        let stats = if multi {
+            format!("{}× changed · cx {} · {}", r.freq, r.complexity, r.repo)
+        } else {
+            format!("{}× changed · cx {}", r.freq, r.complexity)
+        };
         println!(
             "  {}  {} {}",
             hbar(p, (r.score / max).sqrt(), 10, Tone::Watch),
             trunc(&r.file, 38),
-            p.dim(&format!("{}× changed · cx {}", r.freq, r.complexity)),
+            p.dim(&stats),
         );
     }
 }
@@ -387,13 +393,39 @@ border-left:4px solid var(--calm);border-radius:10px;font-weight:500}\
 .bar.now{opacity:1}\
 .note{color:var(--muted);font-size:.85rem;margin-top:.55rem}\
 footer{margin-top:1.6rem;border-top:1px solid var(--line);padding-top:1rem;color:var(--muted);font-size:.82rem}\
-.safety{margin-top:.5rem;font-size:.77rem}";
+.safety{margin-top:.5rem;font-size:.77rem}\
+.section{margin-top:1.9rem}\
+.section h2{font-size:.92rem;font-weight:600;margin:0 0 .15rem;letter-spacing:.01em}\
+.sub{color:var(--muted);font-size:.8rem;margin:0 0 .7rem}\
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:.7rem 1rem}\
+.empty{color:var(--muted);font-size:.85rem;margin:.2rem 0}\
+.trow{display:flex;align-items:center;gap:.55rem;padding:.16rem 0;font-size:.88rem;font-variant-numeric:tabular-nums}\
+.tbar,.hbar{flex:0 0 84px;height:7px;background:var(--line);border-radius:4px;overflow:hidden}\
+.tbar i,.hbar i{display:block;height:100%;border-radius:4px;background:var(--calm)}\
+.hbar i{background:var(--watch)}\
+.tbar.good i{background:var(--good)}.tbar.watch i{background:var(--watch)}.tbar.alarm i{background:var(--alarm)}\
+.tname{flex:1 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\
+.tnum{color:var(--ink);min-width:3.6rem;text-align:right;font-weight:500}\
+.tpct{color:var(--muted);min-width:2.8rem;text-align:right}\
+.traj{width:1rem;text-align:center;font-weight:700}\
+.traj.up{color:var(--watch)}.traj.down{color:var(--good)}.traj.flat{color:var(--muted)}\
+.hrow{display:flex;align-items:center;gap:.6rem;padding:.18rem 0;font-size:.88rem;font-variant-numeric:tabular-nums}\
+.hfile{flex:1 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;\
+font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.82rem}\
+.hmeta{color:var(--muted);font-size:.8rem;white-space:nowrap}";
 
-/// Self-contained HTML report (`--report`): a real web page carrying the same
-/// semantics as the terminal cockpit — verdict-first, tone-colored cards,
-/// now-bar-emphasized sparklines, the same notes + safety line. No external
-/// assets (inline CSS, no CDN/JS), so it opens offline and emails cleanly.
-pub fn write_report(c: &Cockpit, path: &str) -> Result<(), String> {
+/// Self-contained HTML report (the `report` command / `--report`): one web page
+/// carrying the same semantics as all three terminal views — the verdict-first
+/// cockpit, the thrash folder tree, and the hotspots list. No external assets
+/// (inline CSS, no CDN/JS), so it opens offline and emails cleanly.
+pub fn write_report(
+    c: &Cockpit,
+    tree: &TreeNode,
+    hotspots: &[Hotspot],
+    recent: bool,
+    multi: bool,
+    path: &str,
+) -> Result<(), String> {
     let worst = c
         .cards
         .iter()
@@ -422,27 +454,164 @@ pub fn write_report(c: &Cockpit, path: &str) -> Result<(), String> {
         ));
     }
 
+    let window = if recent { "last 8 weeks" } else { "all-time" };
+    let thr_sub = if recent {
+        format!(
+            "In-place rewrite, weighted by recency, by folder · {window}. \
+             % = thrash as a share of that folder's churn. \
+             ↑ heating / ↓ cooling vs the 8-week pace."
+        )
+    } else {
+        format!(
+            "In-place rewrite, weighted by recency, by folder · {window}. \
+             % = thrash as a share of that folder's churn."
+        )
+    };
+    let hot_sub = format!(
+        "Changed often AND deeply nested — the highest-ROI refactor targets · {window}. \
+         Nx = commits that touched the file · cx = nesting complexity."
+    );
+
     let html = format!(
         "<!doctype html><html lang=en><head><meta charset=utf-8>\
 <meta name=viewport content=\"width=device-width,initial-scale=1\">\
 <title>Terminal Velocity · {branch}</title><style>{css}</style></head>\
 <body><main class=wrap>\
-<header><h1>terminal velocity</h1><div class=meta>{branch} · {window}</div></header>\
+<header><h1>terminal velocity</h1><div class=meta>{branch} · {window_lbl}</div></header>\
 <section class=\"verdict {mood}\">{verdict}</section>\
 <section class=grid>{cards}</section>\
+<section class=section><h2>thrash — in-place rewrite</h2>\
+<p class=sub>{thr_sub}</p><div class=panel>{thrash}</div></section>\
+<section class=section><h2>hotspots — refactor targets</h2>\
+<p class=sub>{hot_sub}</p><div class=panel>{hot}</div></section>\
 <footer>{footer}<div class=safety>Self-relative: thresholds are percentiles \
 against this repo's own history, not external benchmarks.</div></footer>\
 </main></body></html>",
         branch = esc(&c.branch),
-        window = esc(&c.window),
+        window_lbl = esc(&c.window),
         mood = tone_class(worst),
         verdict = esc(&c.verdict),
         footer = esc(&c.footer),
+        thr_sub = esc(&thr_sub),
+        hot_sub = esc(&hot_sub),
+        thrash = report_thrash(tree, recent),
+        hot = report_hotspots(hotspots, multi),
         css = REPORT_CSS,
     );
 
     fs::write(path, html).map_err(|e| format!("failed to write {path}: {e}"))?;
     Ok(())
+}
+
+/// The thrash folder tree as HTML rows — same prune/scale/sort as the terminal.
+fn report_thrash(tree: &TreeNode, recent: bool) -> String {
+    if tree.thrash <= 0.0 || tree.children.is_empty() {
+        return "<p class=empty>(no rework recorded)</p>".to_string();
+    }
+    let min = (tree.thrash * 0.025).max(1.0);
+    let scale = tree
+        .children
+        .values()
+        .map(|c| c.thrash)
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
+    let mut out = String::new();
+    let mut shown = 0usize;
+    report_branch(tree, scale, min, 0, recent, &mut shown, &mut out);
+    out
+}
+
+fn report_branch(
+    node: &TreeNode,
+    scale: f64,
+    min: f64,
+    depth: usize,
+    recent: bool,
+    shown: &mut usize,
+    out: &mut String,
+) {
+    let mut kids: Vec<(&String, &TreeNode)> = node
+        .children
+        .iter()
+        .filter(|(_, c)| c.thrash >= min)
+        .collect();
+    kids.sort_by(|a, b| {
+        b.1.thrash
+            .partial_cmp(&a.1.thrash)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for (name, child) in kids {
+        if *shown >= 40 {
+            return;
+        }
+        *shown += 1;
+        let pct = if child.churn > 0.0 {
+            child.thrash / child.churn * 100.0
+        } else {
+            0.0
+        };
+        let t = tone_class(thr_tone(pct));
+        let w = (child.thrash / scale * 100.0).clamp(2.0, 100.0);
+        out.push_str(&format!(
+            "<div class=trow>\
+               <span class=\"tbar {t}\"><i style=\"width:{w:.0}%\"></i></span>\
+               <span class=tname style=\"padding-left:{pad:.2}rem\">{name}</span>{traj}\
+               <span class=tnum>{thr:.0}</span><span class=tpct>{pct:.0}%</span></div>",
+            pad = depth as f64 * 1.1,
+            name = esc(name),
+            traj = report_traj(child, recent),
+            thr = child.thrash,
+        ));
+        report_branch(child, scale, min, depth + 1, recent, shown, out);
+    }
+}
+
+/// Trajectory glyph for a folder (last-7d vs the 8-week pace), only when windowed.
+fn report_traj(node: &TreeNode, recent: bool) -> String {
+    if !recent {
+        return String::new();
+    }
+    let r = if node.thrash > 0.0 {
+        node.thrash_recent / node.thrash
+    } else {
+        0.0
+    };
+    let (cls, ch) = if r > 0.20 {
+        ("up", "↑")
+    } else if r < 0.06 {
+        ("down", "↓")
+    } else {
+        ("flat", "→")
+    };
+    format!("<span class=\"traj {cls}\">{ch}</span>")
+}
+
+/// The hotspots list as HTML rows — sqrt-scaled bars, repo tag when aggregating.
+fn report_hotspots(rows: &[Hotspot], multi: bool) -> String {
+    if rows.is_empty() {
+        return "<p class=empty>(no files)</p>".to_string();
+    }
+    let max = rows
+        .iter()
+        .map(|r| r.score)
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
+    let mut out = String::new();
+    for r in rows {
+        let w = ((r.score / max).sqrt() * 100.0).clamp(2.0, 100.0);
+        let meta = if multi {
+            format!("{}× · cx {} · {}", r.freq, r.complexity, esc(&r.repo))
+        } else {
+            format!("{}× · cx {}", r.freq, r.complexity)
+        };
+        out.push_str(&format!(
+            "<div class=hrow>\
+               <span class=hbar><i style=\"width:{w:.0}%\"></i></span>\
+               <span class=hfile>{file}</span><span class=hmeta>{meta}</span></div>",
+            file = esc(&r.file),
+        ));
+    }
+    out
 }
 
 fn tone_class(t: Tone) -> &'static str {

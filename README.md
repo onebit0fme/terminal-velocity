@@ -94,8 +94,34 @@ Needs a Rust toolchain (`rustup`, then `cargo`):
 cargo build --release          # zero dependencies; builds offline
 ./target/release/tv            # cockpit for the current repo
 ./target/release/tv --repo /path/to/repo
-./target/release/tv --report   # writes tv-report.html
+./target/release/tv thrash     # or: hotspots, explain
+./target/release/tv report     # all three -> one HTML page (tv-report.html)
 cargo test                     # survival-curve unit tests
+```
+
+`report` writes a self-contained HTML page with the cockpit, the thrash tree,
+and the hotspots list. `--report` on any command is shorthand for the same page.
+
+Repeat `--repo` to aggregate several repos. Survival `S(age)` is fit **per
+repo** (repo frailty differs — a pooled curve would misweight every repo), and
+`thrash` / `hotspots` attribute each row to its repo (folder tree rooted at the
+repo; a `· repo` tag on each hotspot). The window is shared, anchored to the
+newest commit across them.
+
+```sh
+./target/release/tv thrash --repo ../a --repo ../b
+```
+
+For a directory of projects — especially git-worktree layouts
+(`project/<branch>/…`) — `scripts/scan-repos.sh` discovers one repo per project
+(each project's `main`/`master` worktree, deduped, feature worktrees and nested
+subtrees skipped) and aggregates them:
+
+```sh
+scripts/scan-repos.sh ~/code            # aggregated status
+scripts/scan-repos.sh ~/code thrash     # any tv subcommand/flags
+TV_DRY=1 scripts/scan-repos.sh ~/code   # just list the selection
+mise run scan -- ~/code thrash          # same, builds release first
 ```
 
 ## Architecture

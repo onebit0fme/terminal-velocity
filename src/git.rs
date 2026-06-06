@@ -123,6 +123,8 @@ pub struct DeathRecord {
 }
 
 /// Everything the survival metrics need. `cens_*` are survivors alive at HEAD.
+/// One per repo — never merged across repos, so each repo's KM curve stays its
+/// own (repo frailty differs; a pooled curve would misweight every repo).
 pub struct Collection {
     pub head: String,
     pub deaths: Vec<DeathRecord>,
