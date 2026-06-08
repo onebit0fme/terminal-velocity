@@ -50,11 +50,9 @@ impl Commit {
         self.added + self.deleted
     }
 
-    /// Whether this commit is the running user's, by email or name (case-insensitive).
-    /// Name is a fallback so email drift (work laptop, noreply addresses) still matches.
+    /// Whether this commit is the running user's (see [`Me::matches`]).
     pub fn by(&self, me: &Me) -> bool {
-        self.author_email.eq_ignore_ascii_case(&me.email)
-            || (!me.name.is_empty() && self.author_name.eq_ignore_ascii_case(&me.name))
+        me.matches(&self.author_email, &self.author_name)
     }
 }
 
@@ -64,6 +62,17 @@ impl Commit {
 pub struct Me {
     pub email: String,
     pub name: String,
+}
+
+impl Me {
+    /// Does an author identity match the running user? Email OR (name, when set),
+    /// case-insensitive. Name is a fallback so email drift (work laptop, noreply
+    /// addresses) still matches. The single definition of "me", shared by the
+    /// commit filter (`Commit::by`) and the survival mask (`Collection::author_mask`).
+    pub fn matches(&self, email: &str, name: &str) -> bool {
+        email.eq_ignore_ascii_case(&self.email)
+            || (!self.name.is_empty() && name.eq_ignore_ascii_case(&self.name))
+    }
 }
 
 /// Semantic severity of a card, independent of the state word (e.g. batch

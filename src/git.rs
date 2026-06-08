@@ -199,10 +199,7 @@ impl Collection {
     pub fn author_mask(&self, me: &Me) -> Vec<bool> {
         self.authors
             .iter()
-            .map(|(email, name)| {
-                email.eq_ignore_ascii_case(&me.email)
-                    || (!me.name.is_empty() && name.eq_ignore_ascii_case(&me.name))
-            })
+            .map(|(email, name)| me.matches(email, name))
             .collect()
     }
 }
@@ -343,10 +340,7 @@ fn commit_index(repo: &str, anchor: &str) -> Result<(HashMap<String, i64>, i64, 
         map.insert(sha.to_string(), i);
         i += 1;
     }
-    let anchor_ts: i64 = git(repo, &["show", "-s", "--format=%ct", anchor])?
-        .trim()
-        .parse()
-        .map_err(|_| "could not read anchor timestamp".to_string())?;
+    let anchor_ts = commit_ts(repo, anchor)?;
     Ok((map, i - 1, anchor_ts))
 }
 
@@ -463,7 +457,9 @@ fn collect(
 /// archaeology never clobbers the everyday cache.
 pub fn collect_cached(repo: &str, commits: &[Commit], anchor: &str) -> Result<Collection, String> {
     let key = git(repo, &["rev-parse", anchor])?.trim().to_string();
-    let is_head = head_sha(repo).map(|h| h == key).unwrap_or(false);
+    // The HEAD-default run (anchor == "HEAD") is by definition HEAD — skip the
+    // extra `rev-parse HEAD` it would otherwise cost on the common warm path.
+    let is_head = anchor == "HEAD" || head_sha(repo).map(|h| h == key).unwrap_or(false);
     let cache = cache_file(repo, &key, is_head);
     if let Some(path) = &cache {
         if let Some(col) = load_cache(path, &key) {
@@ -568,19 +564,22 @@ fn author_args(authors: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Churn (added+deleted) per path. `anchor` (`"HEAD"` or a sha) caps history at
-/// the `--at` point; `since` (unix ts) windows it to recent commits, None = all
-/// history. `authors` (if non-empty) restricts to those commit authors (`--me`).
-pub fn file_churn_totals(
+/// `git log <mode> --format=` over the path-stat history, with the shared windowing
+/// applied: `anchor` (`"HEAD"` or a sha) caps history at the `--at` point, `since`
+/// (unix ts) trails it to recent commits (None = all history), and `authors` (if
+/// non-empty) restricts to those commit authors (`--me`). `mode` is `--numstat`
+/// (churn) or `--name-only` (change frequency).
+fn log_paths(
     repo: &str,
     anchor: &str,
     since: Option<i64>,
     authors: &[String],
-) -> Result<HashMap<String, i64>, String> {
+    mode: &str,
+) -> Result<String, String> {
     let mut args: Vec<String> = vec![
         "log".into(),
         "--no-merges".into(),
-        "--numstat".into(),
+        mode.into(),
         "--format=".into(),
     ];
     if let Some(ts) = since {
@@ -589,7 +588,17 @@ pub fn file_churn_totals(
     args.extend(author_args(authors));
     args.push(anchor.to_string());
     let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = git(repo, &argrefs)?;
+    git(repo, &argrefs)
+}
+
+/// Churn (added+deleted) per path, over the windowed history (see [`log_paths`]).
+pub fn file_churn_totals(
+    repo: &str,
+    anchor: &str,
+    since: Option<i64>,
+    authors: &[String],
+) -> Result<HashMap<String, i64>, String> {
+    let out = log_paths(repo, anchor, since, authors, "--numstat")?;
     let mut m: HashMap<String, i64> = HashMap::new();
     for line in out.lines() {
         if line.trim().is_empty() {
@@ -609,29 +618,16 @@ pub fn file_churn_totals(
     Ok(m)
 }
 
-/// Change frequency: how many (windowed) commits touched each path. The standard
-/// hotspot "change" axis — "edited often" — far less size-skewed than line churn.
-/// `anchor` caps history at the `--at` point; `authors` (if non-empty) restricts
-/// to those commit authors (`--me`).
+/// Change frequency: how many (windowed) commits touched each path (see
+/// [`log_paths`]). The standard hotspot "change" axis — "edited often" — far less
+/// size-skewed than line churn.
 pub fn file_change_freq(
     repo: &str,
     anchor: &str,
     since: Option<i64>,
     authors: &[String],
 ) -> Result<HashMap<String, i64>, String> {
-    let mut args: Vec<String> = vec![
-        "log".into(),
-        "--no-merges".into(),
-        "--name-only".into(),
-        "--format=".into(),
-    ];
-    if let Some(ts) = since {
-        args.push(format!("--since=@{ts}"));
-    }
-    args.extend(author_args(authors));
-    args.push(anchor.to_string());
-    let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = git(repo, &argrefs)?;
+    let out = log_paths(repo, anchor, since, authors, "--name-only")?;
     let mut m: HashMap<String, i64> = HashMap::new();
     for line in out.lines() {
         let p = line.trim();

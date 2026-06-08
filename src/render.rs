@@ -201,19 +201,20 @@ fn thr_tone(pct: f64) -> Tone {
 }
 
 /// The window descriptor for the drill-downs. When anchored (`as_of` set) it drops
-/// the now-implying "last" — the date is already shown, and "8wk to <date>" /
+/// the now-implying "last" — the date is already shown, and "{wk} to <date>" /
 /// "all-time thru <date>" makes the trailing frame explicit on a header-less view.
-fn window_label(recent: bool, as_of: Option<&str>) -> String {
+/// `wk` is the trailing-window unit: "8wk" in the terminal, "8 weeks" in the report.
+fn window_label(recent: bool, as_of: Option<&str>, wk: &str) -> String {
     match (recent, as_of) {
-        (true, None) => "last 8wk".to_string(),
-        (true, Some(d)) => format!("8wk to {d}"),
+        (true, None) => format!("last {wk}"),
+        (true, Some(d)) => format!("{wk} to {d}"),
         (false, None) => "all-time".to_string(),
         (false, Some(d)) => format!("all-time thru {d}"),
     }
 }
 
 pub fn print_thrash(branch: &str, root: &TreeNode, recent: bool, as_of: Option<&str>, p: &Palette) {
-    let window = window_label(recent, as_of);
+    let window = window_label(recent, as_of, "8wk");
     println!(
         "{} {}",
         p.bold("tv thrash"),
@@ -265,23 +266,42 @@ pub fn print_thrash(branch: &str, root: &TreeNode, recent: bool, as_of: Option<&
     );
 }
 
-/// Trend arrow for a folder: last-7d thrash vs its proportional 8-week share
-/// (~1/8). Heating up ↑, cooling ↓, steady →. A space when not in the windowed view.
-fn traj_arrow(p: &Palette, recent: bool, node: &TreeNode) -> String {
-    if !recent {
-        return " ".to_string();
-    }
+/// A folder's recent rework trajectory: last-7d thrash as a fraction of its 8-week
+/// thrash, bucketed against its proportional ~1/8 share. The cut lives here once so
+/// the terminal arrow and the HTML glyph can never disagree.
+enum Trend {
+    Heating, // ↑ more recent rework than its steady share
+    Cooling, // ↓ cooled off
+    Steady,  // → roughly on pace
+}
+
+const TRAJ_HEATING: f64 = 0.20;
+const TRAJ_COOLING: f64 = 0.06;
+
+fn trend(node: &TreeNode) -> Trend {
     let r = if node.thrash > 0.0 {
         node.thrash_recent / node.thrash
     } else {
         0.0
     };
-    if r > 0.20 {
-        p.yellow("↑")
-    } else if r < 0.06 {
-        p.green("↓")
+    if r > TRAJ_HEATING {
+        Trend::Heating
+    } else if r < TRAJ_COOLING {
+        Trend::Cooling
     } else {
-        p.dim("→")
+        Trend::Steady
+    }
+}
+
+/// Trend arrow for a folder (terminal). A space when not in the windowed view.
+fn traj_arrow(p: &Palette, recent: bool, node: &TreeNode) -> String {
+    if !recent {
+        return " ".to_string();
+    }
+    match trend(node) {
+        Trend::Heating => p.yellow("↑"),
+        Trend::Cooling => p.green("↓"),
+        Trend::Steady => p.dim("→"),
     }
 }
 
@@ -363,7 +383,7 @@ pub fn print_hotspots(
     as_of: Option<&str>,
     p: &Palette,
 ) {
-    let window = window_label(recent, as_of);
+    let window = window_label(recent, as_of, "8wk");
     println!(
         "{} {}",
         p.bold("tv hotspots"),
@@ -673,12 +693,7 @@ pub fn write_report(
         ));
     }
 
-    let window = match (recent, as_of) {
-        (true, None) => "last 8 weeks".to_string(),
-        (true, Some(d)) => format!("8 weeks to {d}"),
-        (false, None) => "all-time".to_string(),
-        (false, Some(d)) => format!("all-time thru {d}"),
-    };
+    let window = window_label(recent, as_of, "8 weeks");
     let thr_sub = if recent {
         format!(
             "In-place rewrite, weighted by recency, by folder · {window}. \
@@ -923,17 +938,10 @@ fn report_traj(node: &TreeNode, recent: bool) -> String {
     if !recent {
         return String::new();
     }
-    let r = if node.thrash > 0.0 {
-        node.thrash_recent / node.thrash
-    } else {
-        0.0
-    };
-    let (cls, ch) = if r > 0.20 {
-        ("up", "↑")
-    } else if r < 0.06 {
-        ("down", "↓")
-    } else {
-        ("flat", "→")
+    let (cls, ch) = match trend(node) {
+        Trend::Heating => ("up", "↑"),
+        Trend::Cooling => ("down", "↓"),
+        Trend::Steady => ("flat", "→"),
     };
     format!("<span class=\"traj {cls}\">{ch}</span>")
 }

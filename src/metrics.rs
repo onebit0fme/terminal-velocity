@@ -223,37 +223,23 @@ pub fn cadence_heatmap(commits: &[Commit]) -> Heatmap {
 /// One repo's survival row. `mask` None → the whole repo's curve; Some → only the
 /// lines the running user introduced (`--me`: "how long the code I write lasts").
 fn survival_row(label: &str, col: &Collection, mask: Option<&[bool]>) -> RepoSurvival {
-    let mine = |a: i32| a >= 0 && mask.is_some_and(|m| m[a as usize]);
-    let (ev_c, ev_t, cens_c, cens_t): (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) = if mask.is_none() {
-        (
-            col.deaths.iter().map(|d| d.age_c).collect(),
-            col.deaths.iter().map(|d| d.age_t).collect(),
-            col.cens_c.clone(),
-            col.cens_t.clone(),
-        )
-    } else {
-        let ev_c = col
-            .deaths
-            .iter()
-            .filter(|d| mine(d.intro_a))
-            .map(|d| d.age_c)
-            .collect();
-        let ev_t = col
-            .deaths
-            .iter()
-            .filter(|d| mine(d.intro_a))
-            .map(|d| d.age_t)
-            .collect();
-        let mut cc = Vec::new();
-        let mut ct = Vec::new();
-        for ((c, t), a) in col.cens_c.iter().zip(&col.cens_t).zip(&col.cens_a) {
-            if mine(*a) {
-                cc.push(*c);
-                ct.push(*t);
-            }
+    // No mask → the whole population; with a `--me` mask → only the lines I
+    // introduced. One predicate, one pass each, mask-agnostic.
+    let keep = |a: i32| mask.is_none() || (a >= 0 && mask.is_some_and(|m| m[a as usize]));
+    let (mut ev_c, mut ev_t) = (Vec::new(), Vec::new());
+    for d in &col.deaths {
+        if keep(d.intro_a) {
+            ev_c.push(d.age_c);
+            ev_t.push(d.age_t);
         }
-        (ev_c, ev_t, cc, ct)
-    };
+    }
+    let (mut cens_c, mut cens_t) = (Vec::new(), Vec::new());
+    for ((c, t), a) in col.cens_c.iter().zip(&col.cens_t).zip(&col.cens_a) {
+        if keep(*a) {
+            cens_c.push(*c);
+            cens_t.push(*t);
+        }
+    }
     let (tc, sc) = km_survival(&ev_c, &cens_c);
     let (tt, st) = km_survival(&ev_t, &cens_t);
     let max_age = ev_c.iter().copied().fold(0.0_f64, f64::max);
@@ -281,13 +267,18 @@ fn half_life_str(c: Option<f64>, d: Option<f64>) -> String {
     }
 }
 
+/// The last 8 weeks of a per-week value as a sparkline vector, oldest→newest (so
+/// the renderer's bold final bar is the current week). `f(wk)` is the value for
+/// week-bucket `wk` (0 = current week), or `None` when that week has no data.
+fn weekly_spark(f: impl Fn(i64) -> Option<f64>) -> Vec<f64> {
+    let mut v: Vec<(i64, f64)> = (0i64..8).filter_map(|wk| f(wk).map(|x| (wk, x))).collect();
+    v.sort_by_key(|p| std::cmp::Reverse(p.0)); // oldest (highest wk) first
+    v.into_iter().map(|x| x.1).collect()
+}
+
 /// Weekly throughput (total churn/week) — a steadiness pulse, self-relative.
 fn flow_card(churn_wk: &BTreeMap<i64, f64>) -> Card {
-    let mut v: Vec<(i64, f64)> = (0i64..8)
-        .filter_map(|wk| churn_wk.get(&wk).map(|&c| (wk, c)))
-        .collect();
-    v.sort_by_key(|p| std::cmp::Reverse(p.0));
-    let spark_vals: Vec<f64> = v.iter().map(|x| x.1).collect();
+    let spark_vals = weekly_spark(|wk| churn_wk.get(&wk).copied());
 
     let weekly: Vec<f64> = churn_wk.values().copied().collect();
     let overall = median(&weekly);
@@ -328,16 +319,16 @@ fn rate_card(
     churn_wk: &BTreeMap<i64, f64>,
     healthy: bool,
 ) -> Card {
-    let mut v: Vec<(i64, f64)> = (0i64..8)
-        .filter_map(|wk| {
-            churn_wk.get(&wk).map(|&ch| {
-                let num = wk_map.get(&wk).copied().unwrap_or(0.0);
-                (wk, if ch > 0.0 { num / ch * 100.0 } else { 0.0 })
-            })
+    let spark_vals = weekly_spark(|wk| {
+        churn_wk.get(&wk).map(|&ch| {
+            let num = wk_map.get(&wk).copied().unwrap_or(0.0);
+            if ch > 0.0 {
+                num / ch * 100.0
+            } else {
+                0.0
+            }
         })
-        .collect();
-    v.sort_by_key(|p| std::cmp::Reverse(p.0));
-    let spark_vals: Vec<f64> = v.iter().map(|x| x.1).collect();
+    });
 
     let (state, note) = if healthy {
         ("healthy", "deliberate scope-cutting (healthy)".to_string())
@@ -393,11 +384,7 @@ fn batch_card(commits: &[Commit], anchor: i64) -> (Card, String, f64, f64) {
     let overall = median(&all);
     let recent = by_week.get(&0).map(|v| median(v)).unwrap_or(overall);
 
-    let mut wk_med: Vec<(i64, f64)> = (0i64..8)
-        .filter_map(|wk| by_week.get(&wk).map(|v| (wk, median(v))))
-        .collect();
-    wk_med.sort_by_key(|p| std::cmp::Reverse(p.0)); // oldest (highest wk) first
-    let spark_vals: Vec<f64> = wk_med.iter().map(|x| x.1).collect();
+    let spark_vals = weekly_spark(|wk| by_week.get(&wk).map(|v| median(v)));
 
     let week_medians: Vec<f64> = by_week.values().map(|v| median(v)).collect();
     let pct = percentile_rank(recent, &week_medians);
@@ -460,20 +447,15 @@ fn cadence_card(commits: &[Commit], anchor: i64, tz: Option<i64>) -> (Card, f64,
         recent.iter().filter(|c| is_night(c.ts + off)).count() as f64 / recent.len() as f64 * 100.0
     };
 
-    let mut wk: Vec<(i64, f64)> = (0i64..8)
-        .filter_map(|w| {
-            by_week.get(&w).map(|(n, t)| {
-                let share = if *t > 0 {
-                    *n as f64 / *t as f64 * 100.0
-                } else {
-                    0.0
-                };
-                (w, share)
-            })
+    let spark_vals = weekly_spark(|w| {
+        by_week.get(&w).map(|(n, t)| {
+            if *t > 0 {
+                *n as f64 / *t as f64 * 100.0
+            } else {
+                0.0
+            }
         })
-        .collect();
-    wk.sort_by_key(|p| std::cmp::Reverse(p.0));
-    let spark_vals: Vec<f64> = wk.iter().map(|x| x.1).collect();
+    });
 
     // Flag both drift (recent night share climbing) and sustained high level —
     // for a solo builder the *level* of night/weekend work is the real signal,
@@ -582,10 +564,7 @@ fn insert(
 fn repo_segments(label: &str, path: &str, multi: bool) -> Vec<String> {
     let segs = dir_segments(path);
     if multi {
-        let mut v = Vec::with_capacity(segs.len() + 1);
-        v.push(label.to_string());
-        v.extend(segs);
-        v
+        std::iter::once(label.to_string()).chain(segs).collect()
     } else {
         segs
     }

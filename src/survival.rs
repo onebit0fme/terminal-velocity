@@ -51,16 +51,15 @@ pub fn km_survival(events: &[f64], censored: &[f64]) -> (Vec<f64>, Vec<f64>) {
 }
 
 /// S(age): fraction expected to outlive `age`. 1.0 below the first death time.
+/// `times` is ascending (built sorted by `km_survival`), so a binary search finds
+/// the last step at or before `age` — called once per death, so O(log n) matters.
 pub fn survival_at(times: &[f64], surv: &[f64], age: f64) -> f64 {
-    let mut result = 1.0;
-    for (t, s) in times.iter().zip(surv.iter()) {
-        if *t <= age {
-            result = *s;
-        } else {
-            break;
-        }
+    let k = times.partition_point(|t| *t <= age);
+    if k == 0 {
+        1.0
+    } else {
+        surv[k - 1]
     }
-    result
 }
 
 /// Sample S at `n` evenly spaced ages over [0, `max_age`] — the curve shape, for
