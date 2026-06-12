@@ -1,6 +1,6 @@
 [package]
 name = "terminal-velocity"
-version = "0.0.1"
+version = "0.1.0"
 authors = ["Taras Yanchynskyy"]
 edition = "2021"
 description = "Is your build's speed real throughput, or just thrashing? A git-status for build-flow health."
