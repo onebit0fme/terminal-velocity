@@ -92,3 +92,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release edit "$GITHUB_REF_NAME" --draft=false
+
+  # Bump the formula in onebit0fme/homebrew-tap to this release. Needs a PAT
+  # with contents:write on the tap repo, stored as the HOMEBREW_TAP_TOKEN
+  # secret (the default GITHUB_TOKEN can't write to another repo). Skipped —
+  # not failed — when the secret is absent, so it's safe to merge before adding it.
+  update-tap:
+    needs: publish-release
+    runs-on: ubuntu-latest
+    env:
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Bump Homebrew formula
+        if: ${{ env.TAP_TOKEN != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAP: onebit0fme/homebrew-tap
+          SRC: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: sh .github/update-tap.sh

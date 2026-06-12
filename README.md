@@ -112,6 +112,12 @@ platform and drops `tv` in `~/.local/bin`:
 curl -fsSL https://raw.githubusercontent.com/onebit0fme/terminal-velocity/main/install.sh | sh
 ```
 
+**Homebrew** (macOS / Linux):
+
+```sh
+brew install onebit0fme/tap/tv
+```
+
 **Prebuilt binary** — no toolchain needed. Download the archive for your platform
 from the [latest release](https://github.com/onebit0fme/terminal-velocity/releases/latest),
 unpack it, and put `tv` on your `PATH`:
