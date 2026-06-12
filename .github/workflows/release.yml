@@ -18,7 +18,7 @@ jobs:
   create-release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # Idempotent: reuse an existing draft if a prior run already created one
       # (e.g. a re-tagged release after a fix), so re-runs don't fail on "exists".
       - name: Create draft release
@@ -39,12 +39,15 @@ jobs:
         include:
           - { target: x86_64-unknown-linux-musl,   os: ubuntu-latest }
           - { target: aarch64-unknown-linux-musl,  os: ubuntu-24.04-arm }
-          - { target: x86_64-apple-darwin,         os: macos-13 }
-          - { target: aarch64-apple-darwin,        os: macos-14 }
+          - { target: aarch64-apple-darwin,        os: macos-latest }
+          # Intel macOS is cross-compiled on the Apple Silicon runner (no more
+          # Intel runners — macos-13 is retired, macos-15-intel ends Aug 2027).
+          # Can't execute an x86_64 binary on arm64, so this leg is build-only.
+          - { target: x86_64-apple-darwin,         os: macos-latest, build_only: true }
           - { target: x86_64-pc-windows-msvc,      os: windows-latest }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # musl needs its libc/linker; harmless on the pure-Rust build but avoids
       # any self-contained-linking surprise across runner toolchain versions.
@@ -56,6 +59,7 @@ jobs:
         run: rustup target add ${{ matrix.target }}
 
       - name: Test
+        if: ${{ ! matrix.build_only }}
         run: cargo test --locked --target ${{ matrix.target }}
 
       - name: Build
@@ -83,7 +87,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Publish (undraft)
         env:
           GH_TOKEN: ${{ github.token }}
