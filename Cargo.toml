@@ -1,8 +1,10 @@
 [package]
 name = "terminal-velocity"
 version = "0.0.1"
+authors = ["Taras Yanchynskyy"]
 edition = "2021"
 description = "Is your build's speed real throughput, or just thrashing? A git-status for build-flow health."
+repository = "https://github.com/onebit0fme/terminal-velocity"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 keywords = ["git", "velocity", "metrics", "cli", "devex"]
