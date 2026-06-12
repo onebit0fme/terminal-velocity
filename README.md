@@ -105,6 +105,13 @@ an accurate mental model of what `tv` is (and isn't) inferring.
 
 ## Install
 
+**Quick install** (macOS / Linux) — fetches the right prebuilt binary for your
+platform and drops `tv` in `~/.local/bin`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/onebit0fme/terminal-velocity/main/install.sh | sh
+```
+
 **Prebuilt binary** — no toolchain needed. Download the archive for your platform
 from the [latest release](https://github.com/onebit0fme/terminal-velocity/releases/latest),
 unpack it, and put `tv` on your `PATH`:
@@ -117,14 +124,13 @@ unpack it, and put `tv` on your `PATH`:
 | macOS Intel | `tv-x86_64-apple-darwin.tar.gz` |
 | Windows x86_64 | `tv-x86_64-pc-windows-msvc.zip` |
 
-**With Cargo** — zero dependencies, so building from source is quick:
+**With Cargo** — compiles from the repo (zero dependencies, so it's quick):
 
 ```sh
-cargo install terminal-velocity     # from crates.io -> installs the `tv` binary
-cargo binstall terminal-velocity    # or fetch the prebuilt binary, no compile
+cargo install --git https://github.com/onebit0fme/terminal-velocity
 ```
 
-**From source:**
+**From source** (to hack on it):
 
 ```sh
 git clone https://github.com/onebit0fme/terminal-velocity
