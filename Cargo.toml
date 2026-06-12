@@ -26,3 +26,14 @@ path = "src/main.rs"
 opt-level = 3
 lto = true
 strip = true
+
+# Lets `cargo binstall terminal-velocity` fetch the prebuilt `tv` from the
+# Releases page instead of compiling. Asset names match .github/workflows/release.yml
+# (`tv-{target}.tar.gz`, zip on Windows); the tag is `v{version}`.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/tv-{ target }{ archive-suffix }"
+bin-dir = "tv{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"

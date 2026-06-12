@@ -103,19 +103,47 @@ terminal — the intent classifier, every state threshold, the verdict logic, an
 which signals are self-calibrated vs. tunable constants. The fastest way to build
 an accurate mental model of what `tv` is (and isn't) inferring.
 
-## Install & run
+## Install
 
-Needs a Rust toolchain (`rustup`, then `cargo`):
+**Prebuilt binary** — no toolchain needed. Download the archive for your platform
+from the [latest release](https://github.com/onebit0fme/terminal-velocity/releases/latest),
+unpack it, and put `tv` on your `PATH`:
+
+| Platform | Asset |
+|----------|-------|
+| Linux x86_64 (static — runs on any distro) | `tv-x86_64-unknown-linux-musl.tar.gz` |
+| Linux ARM64 (static) | `tv-aarch64-unknown-linux-musl.tar.gz` |
+| macOS Apple Silicon | `tv-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `tv-x86_64-apple-darwin.tar.gz` |
+| Windows x86_64 | `tv-x86_64-pc-windows-msvc.zip` |
+
+**With Cargo** — zero dependencies, so building from source is quick:
 
 ```sh
-cargo build --release          # zero dependencies; builds offline
-./target/release/tv            # cockpit for the current repo
-./target/release/tv --repo /path/to/repo
-./target/release/tv thrash     # or: hotspots, cadence, explain
-./target/release/tv status --me  # only my commits: my rework + how long my code lasts
-./target/release/tv status --at 2026-03-01  # rewind: build flow as of a past date/commit
-./target/release/tv report     # all three -> one HTML page (tv-report.html)
-cargo test                     # survival-curve unit tests
+cargo install terminal-velocity     # from crates.io -> installs the `tv` binary
+cargo binstall terminal-velocity    # or fetch the prebuilt binary, no compile
+```
+
+**From source:**
+
+```sh
+git clone https://github.com/onebit0fme/terminal-velocity
+cd terminal-velocity
+cargo build --release               # zero dependencies; builds offline
+cargo test                          # survival-curve unit tests
+```
+
+## Run
+
+With `tv` on your `PATH` (Cargo/prebuilt install) — otherwise use `./target/release/tv`:
+
+```sh
+tv                         # cockpit for the current repo
+tv --repo /path/to/repo
+tv thrash                  # or: hotspots, cadence, explain
+tv status --me             # only my commits: my rework + how long my code lasts
+tv status --at 2026-03-01  # rewind: build flow as of a past date/commit
+tv report                  # all three -> one HTML page (tv-report.html)
 ```
 
 `report` writes a self-contained HTML page with the cockpit, the thrash tree,
@@ -128,7 +156,7 @@ repo; a `· repo` tag on each hotspot). The window is shared, anchored to the
 newest commit across them.
 
 ```sh
-./target/release/tv thrash --repo ../a --repo ../b
+tv thrash --repo ../a --repo ../b
 ```
 
 For a directory of projects — especially git-worktree layouts
@@ -153,10 +181,10 @@ timestamp (a bare sha is rejected: it exists in only one of them). Compare two
 periods by running `--at` twice and reading the cockpits side by side.
 
 ```sh
-./target/release/tv status --at HEAD~200                       # as of 200 commits back
-./target/release/tv status --at v1.2.0                         # as of a tag
-./target/release/tv status --repo . --at "3 weeks ago"         # as of a relative date
-./target/release/tv thrash --repo ../a --repo ../b --at a@v1.0 # pin repo a; b snaps to a's time
+tv status --at HEAD~200                       # as of 200 commits back
+tv status --at v1.2.0                         # as of a tag
+tv status --repo . --at "3 weeks ago"         # as of a relative date
+tv thrash --repo ../a --repo ../b --at a@v1.0 # pin repo a; b snaps to a's time
 ```
 
 ## Architecture

@@ -4,6 +4,10 @@
 # Generated HTML report (`tv report` / `--report`)
 tv-report.html
 
+# Local release artifacts (`mise run dist`); the real ones live on GitHub Releases
+tv-*.tar.gz
+tv-*.zip
+
 # Cargo.lock is committed: this is a binary/CLI, so the lock is deliberately tracked.
 # The blame-at-death cache lives inside .git (<gitdir>/tv-cache), so it is never in
 # the working tree and needs no ignore rule.
