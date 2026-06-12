@@ -57,6 +57,22 @@ in `README.md`. This file is how to *work in the code* without breaking them.
 must be green before any milestone is "done." `mise run fmt` fixes formatting.
 Toolchain is pinned in `rust-toolchain.toml` (stable).
 
+## Releasing
+
+Dev loop: edit → `mise run check` → commit. CI runs the same gate.
+
+Cut a release:
+1. Bump `version` in `Cargo.toml`.
+2. `mise run check` — also re-syncs `Cargo.lock` to the new version. **Don't skip:**
+   CI builds with `--locked`, so a stale lock fails every platform.
+3. Commit (incl. `Cargo.lock`) and push.
+4. Tag it, matching the version exactly: `git tag v0.1.1 && git push origin v0.1.1`.
+
+`.github/workflows/release.yml` then builds 5 native targets (Intel macOS is
+cross-compiled on Apple Silicon — no Intel runners) → draft release → publishes
+when all pass → auto-bumps the Homebrew formula in `onebit0fme/homebrew-tap`
+(needs the `HOMEBREW_TAP_TOKEN` secret).
+
 ## Working with the user
 
 - **The user manages git.** Never run `git checkout -b`, `git commit`, `git push`,
