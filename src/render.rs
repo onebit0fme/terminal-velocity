@@ -10,12 +10,7 @@ use crate::model::{Card, Cockpit, Heatmap, RepoSurvival, Tone};
 use crate::spark::sparkline;
 use crate::style::Palette;
 
-const WIDTH: usize = 60;
 const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-
-fn rule() -> String {
-    "─".repeat(WIDTH)
-}
 
 /// Naive word-wrap (byte-width; fine for the mostly-ASCII footer).
 fn wrap(text: &str, width: usize) -> Vec<String> {
@@ -38,8 +33,13 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-pub fn print_cockpit(c: &Cockpit, p: &Palette) {
-    let dim_rule = p.dim(&rule());
+pub fn print_cockpit(c: &Cockpit, p: &Palette, explain: bool) {
+    let dim_rule = p.dim(&p.rule());
+
+    // Masthead: the v∞ mark (terminal velocity = the velocity in the limit) on its
+    // own line, the wordmark spelled out below. A quiet top-left logo that also
+    // sets the board off from the shell prompt above it.
+    println!("{}", p.dim("v∞"));
 
     // Header. Coverage honesty is the only survivor of the old composed verdict:
     // a caveat that applies to the whole board equally, so it rides the header
@@ -58,24 +58,80 @@ pub fn print_cockpit(c: &Cockpit, p: &Palette) {
         p.dim(&format!("· {} · {}", c.branch, c.window)),
     );
     println!("{dim_rule}");
+    println!();
 
     // No composed verdict: the gutter glyph on each card is the status, git-status
     // style. The reader's eye triages; the tool never editorializes what matters.
-    for card in &c.cards {
+    // `--explain` expands each metric in place into its own decision tree, with the
+    // branch that fired for this repo lit — the explanation lives where the metric
+    // does, never as a wall appended after the board.
+    for (i, card) in c.cards.iter().enumerate() {
+        if explain && i > 0 {
+            println!(); // breathing room between expanded metric blocks
+        }
         print_card(card, p);
+        if explain {
+            print_card_explain(card, p);
+        }
     }
+    println!();
     println!("{dim_rule}");
+    println!();
 
     // Survival sits below the indicators, glyph-less — the foundation they weight
-    // against, not a graded metric of its own.
+    // against, not a graded metric of its own. `--explain` expands its one-line
+    // gloss into the S(age) formula + the prose story (it flows from the bottom
+    // line: the curve, then how it's read, then what it means).
     if !c.survival.is_empty() {
-        print_survival(&c.survival, c.personal, p);
+        print_survival(&c.survival, c.personal, explain, p);
+        println!();
         println!("{dim_rule}");
+        println!();
     }
 
-    for line in wrap(&c.footer, WIDTH) {
+    for line in wrap(&c.footer, p.width) {
         println!("{}", p.dim(&line));
     }
+
+    // The deliberate non-goals — what tv refuses to infer from git alone.
+    if explain {
+        println!(
+            "{}",
+            p.dim("not inferred: deploys / incidents / lead-time · people · cross-repo ranks")
+        );
+    }
+}
+
+/// `--explain`: expand a card in place into its decision tree, the branch that
+/// fired (this repo's current state) lit and its siblings dimmed. Reuses the same
+/// `TREE_BODY` that `tv explain` prints, sliced to this metric's section, so the
+/// two surfaces never drift.
+fn print_card_explain(card: &Card, p: &Palette) {
+    let Some(block) = tree_block(&card.key.to_uppercase()) else {
+        return;
+    };
+    for (i, line) in block.lines().enumerate() {
+        let trimmed = line.trim_start();
+        let is_branch = trimmed.starts_with("├─") || trimmed.starts_with("└─");
+        let styled = if is_branch && line.contains(card.state.as_str()) {
+            p.tone(card.tone, &p.bold(line)) // the branch you're on
+        } else if is_branch {
+            p.dim(line) // a road not taken
+        } else if i == 0 {
+            // section header → drop the "TITLE · " prefix, keep the definition
+            p.dim(line.split_once(" · ").map_or(line, |(_, def)| def))
+        } else {
+            p.dim(line) // a continuation/formula line (e.g. thrash's weighting)
+        };
+        println!("     {styled}");
+    }
+}
+
+/// The `TREE_BODY` block (header + branches) for a metric section, e.g. "FLOW".
+fn tree_block(title: &str) -> Option<&'static str> {
+    TREE_BODY
+        .split("\n\n")
+        .find(|b| b.split([' ', '·']).next() == Some(title))
 }
 
 fn print_card(card: &Card, p: &Palette) {
@@ -98,7 +154,7 @@ fn print_card(card: &Card, p: &Palette) {
 /// The survival curve(s) — S(age) — that weight every thrash/excision, shown
 /// below the indicators as their foundation. One repo: curve + half-life +
 /// alive%, with a one-line gloss. Several: one compact row per repo (fit per repo).
-fn print_survival(survivals: &[RepoSurvival], personal: bool, p: &Palette) {
+fn print_survival(survivals: &[RepoSurvival], personal: bool, explain: bool, p: &Palette) {
     // Downsample to a tidy 16-char sparkline (the stored curve is finer for HTML).
     let spark = |c: &[f64]| -> String {
         if c.len() < 2 {
@@ -126,17 +182,8 @@ fn print_survival(survivals: &[RepoSurvival], personal: bool, p: &Palette) {
             p.bold(title),
             spark(&s.curve),
             p.bold(&s.half_life),
-            p.dim(&format!("{:.0}% of lines still alive", s.alive_pct)),
+            p.dim(&format!("{:.0}% alive", s.alive_pct)),
         );
-        let gloss = if personal {
-            "how long the lines you write survive (S(age) over your own code)."
-        } else {
-            "S(age) = a deleted line's odds of having lived this long; \
-             thrash and excision weight every death by it."
-        };
-        for line in wrap(gloss, WIDTH - 2) {
-            println!("{}", p.dim(&format!("  {line}")));
-        }
     } else {
         let tag = if personal {
             "· how long the lines you write survive · per repo"
@@ -152,6 +199,78 @@ fn print_survival(survivals: &[RepoSurvival], personal: bool, p: &Palette) {
                 p.dim(&s.half_life),
                 p.dim(&format!("{:.0}% alive", s.alive_pct)),
             );
+        }
+    }
+
+    // The gloss: `--explain` gives the full S(age) formula + story; otherwise the
+    // one-line read (single repo only — the multi-repo rows speak for themselves).
+    if explain {
+        print_survival_formula(p);
+    } else if survivals.len() == 1 {
+        let gloss = if personal {
+            "how long the lines you write survive (S(age) over your own code)."
+        } else {
+            "S(age) = a deleted line's odds of having lived this long; \
+             thrash and excision weight every death by it."
+        };
+        for line in wrap(gloss, p.width - 2) {
+            println!("{}", p.dim(&format!("  {line}")));
+        }
+    }
+}
+
+/// The S(age) story — the mental model, in prose, told once in full (this is the
+/// verbose surface; `--explain` is where length is welcome). One paragraph per beat.
+const SURVIVAL_STORY: &[&str] = &[
+    "Every line is born the moment a commit first writes it. From then it ages on \
+     two clocks at once: one in days, one in commits, a pulse you can read in either.",
+    "A line can meet two fates. It can be excised, cut from the tree and gone. That \
+     is a death, the only kind that counts. Or it can be rewritten in place, reshaped \
+     but still standing. That isn't dying. It's aging, and the line lives on. So do \
+     the lines still here at HEAD. We don't know their ending yet, so we don't \
+     pretend to.",
+    "From the deaths alone, the repo draws its own survival curve. No borrowed \
+     thirty-day rule, no calendar but its own. At each age a line dies, it asks one \
+     question: of those that made it this far, what share slip away here? Chain those \
+     odds together and you have S(t), the chance a line outlives age t.",
+    "Halfway down sits the half-life, the age where a line's odds of still being here \
+     fall to fifty-fifty. Maybe 103 days, maybe 503 commits, one heartbeat told two \
+     ways. In a young or stubborn repo the curve never falls that far. More than half \
+     the lines simply refuse to die, and the half-life is reported, honestly, as not \
+     yet reached.",
+    "Then there's the elder: one legendary line from a founding commit, survivor of \
+     every excision since, still standing in the code today. Most of its cohort \
+     didn't make it. It hasn't won. It's only still alive, its age still counting, \
+     its ending still unwritten.",
+    "The story of your code is written in git, one line at a time. tv only reads it \
+     back to you.",
+];
+
+/// The `--explain` survival block: the Kaplan-Meier product-limit formula, stacked
+/// (alignment is load-bearing — printed verbatim), a per-symbol breakdown, the edge
+/// it feeds, and then the full story. Replaces the one-line gloss.
+fn print_survival_formula(p: &Palette) {
+    println!();
+    for line in [
+        "           ⎛      dᵢ  ⎞",
+        "  S(t) = ∏ ⎜ 1 − ──── ⎟",
+        "       tᵢ≤t⎝      nᵢ  ⎠",
+    ] {
+        println!("{line}");
+    }
+    println!();
+    for line in [
+        "  dᵢ  deaths at age tᵢ    lines excised, not rewritten",
+        "  nᵢ  still at risk        alive and not yet censored",
+        "  t   age                  in commits, or days",
+        "  →   feeds thrash weight w = S(age) · excision weight",
+    ] {
+        println!("{}", p.dim(line));
+    }
+    for para in SURVIVAL_STORY {
+        println!();
+        for line in wrap(para, p.width - 2) {
+            println!("{}", p.dim(&format!("  {line}")));
         }
     }
 }
@@ -229,7 +348,7 @@ pub fn print_thrash(branch: &str, root: &TreeNode, recent: bool, as_of: Option<&
         p.bold("tv thrash"),
         p.dim(&format!("· {branch} · {window}"))
     );
-    println!("{}", p.dim(&rule()));
+    println!("{}", p.dim(&p.rule()));
     println!(
         "{}",
         p.dim("in-place rewrite: recently-written code rewritten again, weighted")
@@ -265,7 +384,7 @@ pub fn print_thrash(branch: &str, root: &TreeNode, recent: bool, as_of: Option<&
     let floor = thrash_floor(root);
     print_branch(p, root, scale, floor, "", recent);
 
-    println!("{}", p.dim(&rule()));
+    println!("{}", p.dim(&p.rule()));
     println!(
         "{}",
         p.dim(&format!(
@@ -398,7 +517,7 @@ pub fn print_hotspots(
         p.bold("tv hotspots"),
         p.dim(&format!("· {scope} · {window} · revisions × complexity"))
     );
-    println!("{}", p.dim(&rule()));
+    println!("{}", p.dim(&p.rule()));
     println!(
         "{}",
         p.dim("files changed often AND deeply nested — refactoring these pays off most.")
@@ -471,7 +590,7 @@ pub fn print_heatmap(h: &Heatmap, scope: &str, p: &Palette) {
             h.tz
         ))
     );
-    println!("{}", p.dim(&rule()));
+    println!("{}", p.dim(&p.rule()));
     if h.total == 0 {
         println!("  (no commits)");
         return;
@@ -489,7 +608,7 @@ pub fn print_heatmap(h: &Heatmap, scope: &str, p: &Palette) {
         println!(" {day} {cells}");
     }
 
-    println!("{}", p.dim(&rule()));
+    println!("{}", p.dim(&p.rule()));
     println!(
         "  {}  ·  {}",
         p.bold(&format!(
@@ -513,17 +632,14 @@ pub fn print_heatmap(h: &Heatmap, scope: &str, p: &Palette) {
     );
 }
 
-/// The heuristic decision tree, drawn in the terminal. Mirror of the logic in
-/// intent.rs / metrics.rs — keep in sync when thresholds change.
-pub fn print_explain(p: &Palette) {
-    let raw = "\
-terminal velocity · decision tree
-────────────────────────────────────────────────────────────
+const EXPLAIN_HEADER: &str = "\
 how every word in the cockpit is decided.
   ● self-calibrated to your repo (no magic number)
   ○ tunable constant (the only hand-set knobs)
-  ▸ sparklines run 8 weeks old→new — the bold last bar is the latest week in view
+  ▸ sparklines: 8 weeks old→new; bold last bar = the latest week
+";
 
+const TREE_BODY: &str = "\
 INTENT · per commit, first match wins
 ├─ subject has \"revert\" ···················· revert
 ├─ subject has fix/bug/resolve/correct ······ fix
@@ -556,10 +672,10 @@ THRASH · ● in-place rewrite, aged by survival   (% of churn)
 EXCISION · ● the Σ w × (1−rw) half   (% of churn)
 └─ always ···· healthy → \"deliberate scope-cutting\"
 
-CADENCE · local time via `date +%z` · night = 20:00–05:59 · weekend = Sat/Sun
-├─ ○ recent night% > baseline + 7 ····· nights ↑ → \"protect rest\"   (drift)
-├─ ○ weekends > 35%  or  nights > 25% ·· heavy   → \"protect recovery\" (level)
-└─ else ······························· steady
+CADENCE · local time via `date +%z` · night 20:00–05:59 · weekend Sat/Sun
+├─ ○ recent night% > baseline + 7 ··· nights ↑ → \"protect rest\"
+├─ ○ weekend > 35% or night > 25% ··· heavy    → \"protect recovery\"
+└─ else ····························· steady
 
 STATUS · the left-gutter glyph per metric — no composed verdict; you triage
 ├─ · calm   nothing to see          ✓ good   explicit reassurance (green)
@@ -569,11 +685,24 @@ STATUS · the left-gutter glyph per metric — no composed verdict; you triage
 half-life · ● first age where survival S(age) ≤ 0.5
 not inferred: deploys/incidents/lead-time · people · cross-repo ranks
 ";
-    // ● self-calibrated (green) · ○ tunable (yellow) — no-ops when color is off
+
+/// The abstract decision tree (`tv explain`; no repo needed) — the full reference,
+/// every section, nothing lit. `status --explain` instead expands each metric in
+/// place against the live board (see [`print_card_explain`]), reusing `TREE_BODY`.
+/// Mirror of the logic in intent.rs / metrics.rs — keep in sync with thresholds.
+pub fn print_explain(p: &Palette) {
+    println!("{}", p.bold("terminal velocity · decision tree"));
+    println!("{}", p.dim(&p.rule()));
     print!(
-        "{}",
-        raw.replace('●', &p.green("●")).replace('○', &p.yellow("○"))
+        "{}\n{}",
+        colorize_markers(p, EXPLAIN_HEADER),
+        colorize_markers(p, TREE_BODY),
     );
+}
+
+/// ● self-calibrated (green) · ○ tunable (yellow) — no-ops when color is off.
+fn colorize_markers(p: &Palette, s: &str) -> String {
+    s.replace('●', &p.green("●")).replace('○', &p.yellow("○"))
 }
 
 fn esc(s: &str) -> String {

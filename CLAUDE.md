@@ -19,7 +19,10 @@ rationale and the design non-negotiables live in `README.md`. This file is how t
   build offline with nothing to fetch.
 - **Deterministic & offline.** Same repo + same anchor → same output. No network,
   no LLM at runtime. Each metric's status is *rule-composed* from its own data
-  (`metrics.rs`), never generated.
+  (`metrics.rs`), never generated. *Presentation* adapts to the terminal — color
+  and board width (`Palette`, detected via `stty`) track the tty — but piped /
+  non-tty output uses fixed defaults (80 cols, no color), so scripted runs stay
+  byte-stable. Data is deterministic; only the frame around it flexes.
 - **Status, never a verdict.** The board shows every metric with equal billing,
   each tagged with a left-gutter status glyph (`Tone::glyph` — `·` calm / `✓` good
   / `▲` watch / `■` alarm; symbol-distinct so it survives `NO_COLOR` and colorblind

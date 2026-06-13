@@ -1,5 +1,7 @@
 # terminal velocity (`tv`)
 
+> **v∞ = lim v(t)**  as  *t → ∞*  — the speed a build actually sustains.
+
 **Is your build's speed real throughput, or just thrashing?**
 
 A `git status` for build-flow health. Run `tv`, get one terminal screen: a dense
@@ -15,6 +17,7 @@ A tachometer, not a speedometer. The name is also the pun: it runs in your
 hold — not the burst you imagine.
 
 ```
+v∞
 terminal velocity · main · last 7d vs trailing 8wk
 ────────────────────────────────────────────────────────────
   ✓  flow      ▁▂▁▁▁█▃   ramping · ~19059 lines/wk
@@ -108,6 +111,12 @@ Run **`tv explain`** to print the full heuristic decision tree right in the
 terminal — the intent classifier, every state threshold, the status glyphs, and
 which signals are self-calibrated vs. tunable constants. The fastest way to build
 an accurate mental model of what `tv` is (and isn't) inferring.
+
+Or run **`tv status --explain`** to fold that tree into the live board: each
+metric expands *in place* into its own branches, the one that fired for your repo
+in bold and the rest dimmed, so the explanation sits right under the number it
+explains. The survival line then opens into the Kaplan-Meier formula and the full
+story of how a line lives and dies. Same tree, lit against your own history.
 
 ## Install
 

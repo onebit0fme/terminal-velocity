@@ -40,6 +40,7 @@ struct Config {
     color_off: bool,
     all_time: bool,
     me: bool,
+    explain: bool,
     at: Option<String>,
 }
 
@@ -296,6 +297,7 @@ fn parse_args() -> Result<Config, String> {
     let mut color_off = false;
     let mut all_time = false;
     let mut me = false;
+    let mut explain = false;
     let mut at: Option<String> = None;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -305,13 +307,15 @@ fn parse_args() -> Result<Config, String> {
                 exit(0);
             }
             "-V" | "--version" => {
-                println!("tv (terminal-velocity) {}", env!("CARGO_PKG_VERSION"));
+                println!("tv {} · terminal velocity", env!("CARGO_PKG_VERSION"));
+                println!("v∞ = lim v(t),  t → ∞");
                 exit(0);
             }
             "--report" => report = true,
             "--no-color" => color_off = true,
             "--all" => all_time = true,
             "--me" => me = true,
+            "--explain" => explain = true,
             "--at" => at = Some(it.next().ok_or("--at requires a commit, ref, or date")?),
             "--repo" => repos.push(it.next().ok_or("--repo requires a path")?),
             "status" => command = Command::Status,
@@ -333,6 +337,7 @@ fn parse_args() -> Result<Config, String> {
         color_off,
         all_time,
         me,
+        explain,
         at,
     })
 }
@@ -341,6 +346,7 @@ fn print_help() {
     print!(
         "\
 terminal velocity (tv) — is your build's speed real throughput, or just thrashing?
+v∞ = lim v(t),  t → ∞
 
 USAGE:
     tv [COMMAND] [--repo <path>]... [--at <point>] [--me] [--report]
@@ -351,7 +357,7 @@ COMMANDS:
     hotspots    files ranked by churn × complexity
     cadence     weekday × hour commit punchcard (when commits land)
     report      write every view to one self-contained HTML page (tv-report.html)
-    explain     print the heuristic decision tree
+    explain     print the heuristic decision tree (abstract; no repo needed)
 
 OPTIONS:
     --repo <path>   analyze this repo; repeat the flag to aggregate several
@@ -361,6 +367,8 @@ OPTIONS:
     --all           thrash/hotspots over all history (default: last 8 weeks)
     --me            only my own commits (from git config); my rework + how long
                     the code I write survives. Self only — no per-teammate view.
+    --explain       (status) expand the board: the S(age) formula + the decision
+                    tree, with the branch that fired for your repo lit up
     --at <point>    rewind the as-of point for archaeology / period comparison
                     (default: HEAD). A single repo takes a rev or date:
                       --at v1.2.0   --at HEAD~50   --at 2026-03-01   --at \"3 weeks ago\"
@@ -569,7 +577,7 @@ fn run(cfg: Config) -> Result<(), String> {
         Command::Status => {
             let cockpit =
                 metrics::build_cockpit(&commits, &cols, &header, me.as_ref(), as_of.as_deref());
-            render::print_cockpit(&cockpit, &palette);
+            render::print_cockpit(&cockpit, &palette, cfg.explain);
         }
         Command::Thrash => {
             let churn = repo_churn(&paths, &labels, &anchors, since, &author_pats)?;
