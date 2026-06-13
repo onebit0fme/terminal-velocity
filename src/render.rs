@@ -1,6 +1,7 @@
 //! Output skins. Terminal cockpit is the default (daily glance); the HTML
 //! report (the `report` command / `--report`) is the manager/retro skin —
-//! cockpit + thrash + hotspots on one page. Both lead with the verdict.
+//! cockpit + thrash + hotspots on one page. No composed verdict on either: the
+//! board is git-status-shaped — every metric shown, each tagged with its status.
 
 use std::fs;
 
@@ -16,7 +17,7 @@ fn rule() -> String {
     "─".repeat(WIDTH)
 }
 
-/// Naive word-wrap (byte-width; fine for the mostly-ASCII verdict/footer).
+/// Naive word-wrap (byte-width; fine for the mostly-ASCII footer).
 fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut cur = String::new();
@@ -39,56 +40,64 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 
 pub fn print_cockpit(c: &Cockpit, p: &Palette) {
     let dim_rule = p.dim(&rule());
+
+    // Header. Coverage honesty is the only survivor of the old composed verdict:
+    // a caveat that applies to the whole board equally, so it rides the header
+    // (yellow, to draw the eye), not any one metric.
+    let provisional = if c.is_provisional() {
+        format!(
+            " {}",
+            p.yellow(&format!("· provisional ({}wk)", c.coverage_weeks))
+        )
+    } else {
+        String::new()
+    };
     println!(
-        "{} {}",
+        "{} {}{provisional}",
         p.bold("terminal velocity"),
-        p.dim(&format!("· {} · {}", c.branch, c.window))
+        p.dim(&format!("· {} · {}", c.branch, c.window)),
     );
     println!("{dim_rule}");
 
-    // verdict is colored by the worst tone on the board — the cockpit's mood
-    let worst = c
-        .cards
-        .iter()
-        .map(|x| x.tone)
-        .max_by_key(|t| t.rank())
-        .unwrap_or(Tone::Calm);
-    for line in wrap(&c.verdict, WIDTH) {
-        println!("{}", p.mood(worst, &line));
+    // No composed verdict: the gutter glyph on each card is the status, git-status
+    // style. The reader's eye triages; the tool never editorializes what matters.
+    for card in &c.cards {
+        print_card(card, p);
     }
     println!("{dim_rule}");
 
+    // Survival sits below the indicators, glyph-less — the foundation they weight
+    // against, not a graded metric of its own.
     if !c.survival.is_empty() {
         print_survival(&c.survival, c.personal, p);
         println!("{dim_rule}");
     }
 
-    for card in &c.cards {
-        print_card(card, p);
-    }
-    println!("{dim_rule}");
     for line in wrap(&c.footer, WIDTH) {
         println!("{}", p.dim(&line));
     }
 }
 
 fn print_card(card: &Card, p: &Palette) {
+    // The left-gutter glyph is the at-a-glance status; reading the column down
+    // the board is the whole "verdict". Symbol carries it; color reinforces.
+    let glyph = p.tone(card.tone, card.tone.glyph());
     let key = p.bold(&format!("{:<9}", card.key));
     let spark = decorate_spark(p, card.tone, &card.spark);
     let state = p.tone(card.tone, &card.state);
     if card.available {
-        println!("  {key} {spark} {state} · {}", card.headline);
+        println!("  {glyph}  {key} {spark} {state} · {}", card.headline);
     } else {
-        println!("  {key} {spark} {state}");
+        println!("  {glyph}  {key} {spark} {state}");
     }
     if let Some(note) = &card.note {
-        println!("{}", p.dim(&format!("             └ {note}")));
+        println!("{}", p.dim(&format!("        └ {note}")));
     }
 }
 
-/// The survival curve(s) — S(age) — that weight every thrash/excision, surfaced
-/// right under the verdict. One repo: curve + half-life + alive%, with a one-line
-/// gloss. Several: one compact row per repo (S is fit per repo).
+/// The survival curve(s) — S(age) — that weight every thrash/excision, shown
+/// below the indicators as their foundation. One repo: curve + half-life +
+/// alive%, with a one-line gloss. Several: one compact row per repo (fit per repo).
 fn print_survival(survivals: &[RepoSurvival], personal: bool, p: &Palette) {
     // Downsample to a tidy 16-char sparkline (the stored curve is finer for HTML).
     let spark = |c: &[f64]| -> String {
@@ -505,7 +514,7 @@ pub fn print_heatmap(h: &Heatmap, scope: &str, p: &Palette) {
 }
 
 /// The heuristic decision tree, drawn in the terminal. Mirror of the logic in
-/// intent.rs / metrics.rs / verdict.rs — keep in sync when thresholds change.
+/// intent.rs / metrics.rs — keep in sync when thresholds change.
 pub fn print_explain(p: &Palette) {
     let raw = "\
 terminal velocity · decision tree
@@ -552,11 +561,10 @@ CADENCE · local time via `date +%z` · night = 20:00–05:59 · weekend = Sat/S
 ├─ ○ weekends > 35%  or  nights > 25% ·· heavy   → \"protect recovery\" (level)
 └─ else ······························· steady
 
-VERDICT · the top line (composed, never an LLM)
-├─ ○ < 3 weeks history → \"BUILDING BASELINE — provisional\"
-├─ lead  = batch phrase + thrash phrase
-└─ watch = any of: batch rising · nights ↑ · thrash ≥15%
-           none → \"nothing drifting — you're building, not spinning\"
+STATUS · the left-gutter glyph per metric — no composed verdict; you triage
+├─ · calm   nothing to see          ✓ good   explicit reassurance (green)
+├─ ▲ watch  drifting — look           ■ alarm  act (red)
+└─ ○ < 3 weeks history → header chip \"provisional (Nwk)\" (caveats the board)
 
 half-life · ● first age where survival S(age) ≤ 0.5
 not inferred: deploys/incidents/lead-time · people · cross-repo ranks
@@ -590,11 +598,7 @@ h1{font-size:1rem;font-weight:600;margin:0;letter-spacing:.01em}\
 .asof{display:inline-block;margin-top:.55rem;padding:.22rem .65rem;border-radius:999px;\
 background:var(--watchbg);color:var(--watch);border:1px solid var(--watch);\
 font-size:.8rem;font-weight:600;letter-spacing:.01em;font-variant-numeric:tabular-nums}\
-.verdict{margin:1.4rem 0;padding:.95rem 1.15rem;background:var(--panel);border:1px solid var(--line);\
-border-left:4px solid var(--calm);border-radius:10px;font-weight:500}\
-.verdict.good{border-left-color:var(--good)}\
-.verdict.watch{border-left-color:var(--watch);background:var(--watchbg)}\
-.verdict.alarm{border-left-color:var(--alarm);background:var(--alarmbg)}\
+.asof+.asof{margin-left:.4rem}\
 .grid{display:grid;gap:.7rem}\
 .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:.85rem 1.1rem}\
 .row{display:flex;align-items:baseline;gap:.6rem}\
@@ -652,7 +656,7 @@ font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.82re
 .hgrid i.cell.peak{outline:1.5px solid var(--ink);outline-offset:1px}";
 
 /// Self-contained HTML report (the `report` command / `--report`): one web page
-/// carrying the same semantics as all three terminal views — the verdict-first
+/// carrying the same semantics as all three terminal views — the status-board
 /// cockpit, the thrash folder tree, and the hotspots list. No external assets
 /// (inline CSS, no CDN/JS), so it opens offline and emails cleanly.
 pub fn write_report(
@@ -665,12 +669,6 @@ pub fn write_report(
     path: &str,
 ) -> Result<(), String> {
     let as_of = c.as_of.as_deref();
-    let worst = c
-        .cards
-        .iter()
-        .map(|x| x.tone)
-        .max_by_key(|t| t.rank())
-        .unwrap_or(Tone::Calm);
 
     let mut cards = String::new();
     for card in &c.cards {
@@ -742,14 +740,22 @@ pub fn write_report(
         Some(d) => format!("<div class=asof>snapshot · as of {}</div>", esc(d)),
         None => String::new(),
     };
+    // Coverage honesty, same caveat as the terminal header chip.
+    let prov_badge = if c.is_provisional() {
+        format!(
+            "<div class=asof>provisional · {}wk of history</div>",
+            c.coverage_weeks
+        )
+    } else {
+        String::new()
+    };
 
     let html = format!(
         "<!doctype html><html lang=en><head><meta charset=utf-8>\
 <meta name=viewport content=\"width=device-width,initial-scale=1\">\
 <title>Terminal Velocity · {branch}</title><style>{css}</style></head>\
 <body><main class=wrap>\
-<header><h1>terminal velocity</h1><div class=meta>{branch} · {window_lbl}</div>{asof_badge}</header>\
-<section class=\"verdict {mood}\">{verdict}</section>\
+<header><h1>terminal velocity</h1><div class=meta>{branch} · {window_lbl}</div>{asof_badge}{prov_badge}</header>\
 <section class=section><h2>{surv_h2}</h2>\
 <p class=sub>{surv_sub}</p><div class=panel>{survival}</div></section>\
 <section class=grid>{cards}</section>\
@@ -765,8 +771,7 @@ against this repo's own history, not external benchmarks.</div></footer>\
         branch = esc(&c.branch),
         window_lbl = esc(&c.window),
         asof_badge = asof_badge,
-        mood = tone_class(worst),
-        verdict = esc(&c.verdict),
+        prov_badge = prov_badge,
         footer = esc(&c.footer),
         thr_sub = esc(&thr_sub),
         hot_sub = esc(&hot_sub),

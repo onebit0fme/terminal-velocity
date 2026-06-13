@@ -2,10 +2,11 @@
 
 **Is your build's speed real throughput, or just thrashing?**
 
-A `git status` for build-flow health. Run `tv`, get one terminal screen: a plain
-verdict, then 3–4 leading indicators — each a headline + sparkline + where-you-sit
-vs. *your own* history + one action (or an explicit "ignore"). Mostly quiet;
-surfaces the one or two things drifting.
+A `git status` for build-flow health. Run `tv`, get one terminal screen: a dense
+status board — 3–4 leading indicators, each with an at-a-glance status glyph +
+headline + sparkline + where-you-sit vs. *your own* history + one action (or an
+explicit "ignore"). No summary sentence editorializing what matters; you read the
+glyph column and triage. Mostly quiet; an all-`·` board is "clean".
 
 It measures the **interior** of velocity — how code is produced and evolves — not
 delivery outcomes (deploys, incidents, lead time live in your CI/CD dashboards).
@@ -16,36 +17,39 @@ hold — not the burst you imagine.
 ```
 terminal velocity · main · last 7d vs trailing 8wk
 ────────────────────────────────────────────────────────────
-BUILD FLOW: steady, batches creeping. No thrash spiral.
-Watch: batch median 190→240, split smaller.
+  ✓  flow      ▁▂▁▁▁█▃   ramping · ~19059 lines/wk
+  ▲  batch     ▃▃▄▅▆▆▇   rising · median 190→240 (p78 for you)
+        └ split smaller — cheapest flow win
+  ✓  thrash    ▇▅█▃▃▁▆   low · 6.1% of churn
+        └ low — your speed is real throughput, not thrashing
+  ✓  excision  ▂█▂▂▁▆▃   healthy · 9.6% of churn
+        └ deliberate scope-cutting (healthy)
+  ·  cadence   ▁▂▂▃▂▂▃   steady · nights 14% · weekends 9% (local, UTC-4)
 ────────────────────────────────────────────────────────────
 code survival  █▇▇▆▆▅▄▄▄▄▃▃▃▁▁▁  half-life ~491c / ~86d · 76% of lines still alive
   S(age) = a deleted line's odds of having lived this long;
   thrash and excision weight every death by it.
 ────────────────────────────────────────────────────────────
-  flow      ▁▂▁▁▁█▃   ramping · ~19059 lines/wk
-  batch     ▃▃▄▅▆▆▇   rising · median 190→240 (p78 for you)
-            └ split smaller — cheapest flow win
-  thrash    ▇▅█▃▃▁▆   low · 6.1% of churn
-            └ low — your speed is real throughput, not thrashing
-  excision  ▂█▂▂▁▆▃   healthy · 9.6% of churn
-            └ deliberate scope-cutting (healthy)
-  cadence   ▁▂▂▃▂▂▃   steady · nights 14% · weekends 9% (local, UTC-4)
-────────────────────────────────────────────────────────────
 net +334k (… added, … deleted) · run `tv thrash` / `tv hotspots` to drill in
 ```
+
+The left-gutter glyph is the at-a-glance status: `·` calm · `✓` good · `▲` watch
+· `■` alarm (symbol-distinct, so it reads under `NO_COLOR` too). Read the column,
+not a sentence — here, batch wants a look. An all-`·` gutter is "clean".
 
 ## Why it exists
 
 The job is **legibility**. Under shipping pressure you're usually building fine
 but can't *see* the shape of it, so anxiety fills the vacuum. `tv` makes the shape
-visible — and the reassurance line ("nothing drifting, you're building, not
-spinning") matters as much as the alarms.
+visible — and an all-calm board (`· · · · ·`) is as much the point as the alarms:
+quiet, stated plainly, is reassurance you can trust.
 
 ## Design non-negotiables
 
-1. **Verdict before chart.** A human-readable "build flow is X; watch Y; Z is
-   fine" on top. Charts are the drill-down. (Stops it being metric-theater.)
+1. **Status, not a verdict.** Every metric shown with equal billing, each tagged
+   with a status glyph; you read the column and triage. No summary sentence — it
+   would be lossy and would editorialize *what matters* for you. (Stops it being
+   both metric-theater and a thumb on the scale.)
 2. **Trends, not snapshots.** Every number is a sparkline against a trailing
    baseline. A *rising* batch median is the signal; the absolute 240 isn't.
 3. **Your own distribution is the axis.** "p78 for you," never "elite vs low."
@@ -62,10 +66,12 @@ spinning") matters as much as the alarms.
    permission to ignore mechanical churn is as important as the alarm.
 6. **Git-status-fast.** Daily glance < ~2s via an incremental, HEAD-keyed cache:
    only new commits get the expensive blame pass.
-7. **Coverage honesty.** Too little history? Say "building baseline" — don't
+7. **Coverage honesty.** Too little history? Flag the board `provisional` — don't
    render a confident-but-fake percentile.
-8. **Deterministic & offline.** The verdict is rule-composed from metric states —
-   no network, no LLM at runtime. A learned classifier may *sharpen* intent
+8. **Status, not a verdict.** Every metric is shown with equal billing and tagged
+   with a status glyph; you triage. No condensed summary line — it would be lossy
+   and would editorialize what matters. Each status is rule-composed from its own
+   data, no network, no LLM at runtime. A learned classifier may *sharpen* intent
    labels later via an external call, but it's never required to run `tv`.
 
 ## Metrics
@@ -79,7 +85,7 @@ spinning") matters as much as the alarms.
 | **flow** | survival-weighted build-flow rate | ✅ live |
 | **thrash** | in-place rewrite, S-weighted (the risk signal) | ✅ live · `tv thrash` by area |
 | **excision** | wholesale removal (healthy scope-cutting) | ✅ live |
-| **survival** | the S(age) curve + half-life + % still alive (Kaplan-Meier) | ✅ live · shown under the verdict |
+| **survival** | the S(age) curve + half-life + % still alive (Kaplan-Meier) | ✅ live · the foundation, shown below the indicators |
 | **hotspots** | churn × complexity, by file | ✅ live · `tv hotspots` |
 
 `tv status` and `tv report` lead with the **survival curve** — S(age), a deleted
@@ -99,7 +105,7 @@ long the lines you write last — introducer = you). It's self-only by design.
 ## How it decides
 
 Run **`tv explain`** to print the full heuristic decision tree right in the
-terminal — the intent classifier, every state threshold, the verdict logic, and
+terminal — the intent classifier, every state threshold, the status glyphs, and
 which signals are self-calibrated vs. tunable constants. The fastest way to build
 an accurate mental model of what `tv` is (and isn't) inferring.
 
@@ -210,7 +216,6 @@ src/
   survival.rs   Kaplan-Meier survival + half-life (the self-calibrating yardstick)
   spark.rs      sparklines, percentile-against-own-history, median
   metrics.rs    build the cockpit + thrash tree + hotspots (all live)
-  verdict.rs    deterministic verdict composer (rule-based, offline)
   style.rs      zero-dep ANSI palette (NO_COLOR / --no-color aware)
   render.rs     terminal cockpit (default) + HTML report (--report)
 ```

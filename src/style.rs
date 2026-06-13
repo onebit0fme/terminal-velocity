@@ -55,14 +55,4 @@ impl Palette {
             Tone::Alarm => self.red(s),
         }
     }
-
-    /// Color the verdict by the worst tone on the board (the cockpit's mood).
-    pub fn mood(&self, worst: Tone, s: &str) -> String {
-        let body = match worst {
-            Tone::Alarm => self.red(s),
-            Tone::Watch => self.yellow(s),
-            _ => self.green(s),
-        };
-        self.bold(&body)
-    }
 }

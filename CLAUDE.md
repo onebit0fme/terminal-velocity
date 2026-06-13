@@ -1,9 +1,10 @@
 # Terminal Velocity (`tv`)
 
 A `git status` for build-flow health: read commit history, print a one-screen
-verdict plus a few self-calibrated leading indicators. Zero-dependency Rust,
-deterministic, offline. The product rationale and the design non-negotiables live
-in `README.md`. This file is how to *work in the code* without breaking them.
+status board — a few self-calibrated leading indicators, each with a status glyph
+you triage at a glance. Zero-dependency Rust, deterministic, offline. The product
+rationale and the design non-negotiables live in `README.md`. This file is how to
+*work in the code* without breaking them.
 
 ## Invariants — don't regress these
 
@@ -17,8 +18,17 @@ in `README.md`. This file is how to *work in the code* without breaking them.
   hand-rolled ANSI (`style.rs`); arg parsing is hand-rolled (`main.rs`). It must
   build offline with nothing to fetch.
 - **Deterministic & offline.** Same repo + same anchor → same output. No network,
-  no LLM at runtime. The verdict is *rule-composed* from metric states
-  (`verdict.rs`), never generated.
+  no LLM at runtime. Each metric's status is *rule-composed* from its own data
+  (`metrics.rs`), never generated.
+- **Status, never a verdict.** The board shows every metric with equal billing,
+  each tagged with a left-gutter status glyph (`Tone::glyph` — `·` calm / `✓` good
+  / `▲` watch / `■` alarm; symbol-distinct so it survives `NO_COLOR` and colorblind
+  eyes — color only reinforces). The reader's eye triages; an all-`·` gutter reads
+  as "clean", git-status-style. Deliberately **no composed prose verdict**: any
+  one-line summary is lossy and editorializes *what matters* (selective bias), the
+  same sin as ranking people. Coverage honesty (`< BASELINE_WEEKS` of history →
+  `provisional` chip) is the one global caveat, and it rides the header, not a
+  metric. (This retired the old `verdict.rs` composer.)
 - **The classifier is a future seam, never a runtime requirement.** A learned/DLM
   intent classifier may *sharpen* labels later via an external call, but `tv` must
   always run fully without it. `intent.rs` is the heuristic; keep the swap-point

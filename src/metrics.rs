@@ -6,7 +6,6 @@ use crate::git::Collection;
 use crate::model::{Card, Cockpit, Commit, Heatmap, Me, RepoSurvival, Tone};
 use crate::spark::{median, percentile_rank, sparkline};
 use crate::survival::{half_life, km_survival, sample_survival, survival_at};
-use crate::verdict::{self, Signals};
 
 const DAY: i64 = 86_400;
 const WEEK: i64 = 7 * DAY;
@@ -126,34 +125,18 @@ pub fn build_cockpit(
     let thr_pct = thr_tot / total_churn * 100.0;
     let exc_pct = exc_tot / total_churn * 100.0;
 
-    let (batch, batch_state, batch_from, batch_to) = batch_card(commits, anchor);
     let tz = local_offset_secs();
-    let (cadence, nights_recent, nights_base, weekend_pct) = cadence_card(commits, anchor, tz);
-
     let cards = vec![
         flow_card(&churn_wk),
-        batch,
+        batch_card(commits, anchor),
         rate_card("thrash", thr_pct, &thr_wk, &churn_wk, false),
         rate_card("excision", exc_pct, &exc_wk, &churn_wk, true),
-        cadence,
+        cadence_card(commits, anchor, tz),
     ];
 
     let added: i64 = commits.iter().map(|c| c.added).sum();
     let deleted: i64 = commits.iter().map(|c| c.deleted).sum();
     let net = added - deleted;
-
-    let sig = Signals {
-        coverage_weeks,
-        batch_state,
-        batch_from,
-        batch_to,
-        nights_recent,
-        nights_base,
-        weekend_pct,
-        thrash_pct: thr_pct,
-        net,
-    };
-    let verdict = verdict::compose(&sig);
 
     let footer = format!(
         "net {net:+} ({added} added, {deleted} deleted) · \
@@ -170,7 +153,6 @@ pub fn build_cockpit(
             "last 7d vs trailing 8wk".to_string()
         },
         as_of: as_of.map(str::to_string),
-        verdict,
         survival,
         personal: me.is_some(),
         cards,
@@ -368,8 +350,7 @@ fn rate_card(
     }
 }
 
-/// Returns (card, state, overall_median, recent_median).
-fn batch_card(commits: &[Commit], anchor: i64) -> (Card, String, f64, f64) {
+fn batch_card(commits: &[Commit], anchor: i64) -> Card {
     let mut by_week: BTreeMap<i64, Vec<f64>> = BTreeMap::new();
     let mut all: Vec<f64> = Vec::with_capacity(commits.len());
     for c in commits {
@@ -406,21 +387,19 @@ fn batch_card(commits: &[Commit], anchor: i64) -> (Card, String, f64, f64) {
         "easing" => Tone::Good,
         _ => Tone::Calm,
     };
-    let card = Card {
+    Card {
         key: "batch".to_string(),
         headline,
         spark: sparkline(&spark_vals),
         spark_values: spark_vals,
-        state: state.clone(),
+        state,
         tone,
         note,
         available: true,
-    };
-    (card, state, overall, recent)
+    }
 }
 
-/// Returns (card, recent_night%, baseline_night%, weekend%).
-fn cadence_card(commits: &[Commit], anchor: i64, tz: Option<i64>) -> (Card, f64, f64, f64) {
+fn cadence_card(commits: &[Commit], anchor: i64, tz: Option<i64>) -> Card {
     let off = tz.unwrap_or(0);
     let mut by_week: BTreeMap<i64, (i64, i64)> = BTreeMap::new(); // (night, total)
     let mut tot_night = 0_i64;
@@ -501,7 +480,7 @@ fn cadence_card(commits: &[Commit], anchor: i64, tz: Option<i64>) -> (Card, f64,
         tz_label(tz)
     );
 
-    let card = Card {
+    Card {
         key: "cadence".to_string(),
         headline,
         spark: sparkline(&spark_vals),
@@ -510,8 +489,7 @@ fn cadence_card(commits: &[Commit], anchor: i64, tz: Option<i64>) -> (Card, f64,
         tone,
         note,
         available: true,
-    };
-    (card, recent_night, baseline_night, weekend_pct)
+    }
 }
 
 /// A folder in the thrash tree. Each node accumulates the S-weighted thrash /

@@ -94,10 +94,24 @@ impl Tone {
             Tone::Alarm => 3,
         }
     }
+
+    /// The status glyph shown in the cockpit's left gutter. Symbol-distinct (not
+    /// only color) so the board still reads under NO_COLOR and for colorblind eyes
+    /// — color is reinforcement, not the channel. This is the whole "verdict": a
+    /// column of these, git-status-style, that the reader triages.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Tone::Calm => "·",
+            Tone::Good => "✓",
+            Tone::Watch => "▲",
+            Tone::Alarm => "■",
+        }
+    }
 }
 
-/// One leading-indicator row in the cockpit: headline + sparkline + where-you-sit
-/// + a plain verdict, and either an action or an explicit permission to ignore.
+/// One leading-indicator row in the cockpit: a status glyph (its `tone`) +
+/// headline + sparkline + where-you-sit + a plain state word, and either an
+/// action or an explicit permission to ignore.
 #[derive(Clone, Debug)]
 pub struct Card {
     pub key: String,
@@ -142,7 +156,13 @@ pub struct Heatmap {
     pub night_pct: f64,
 }
 
-/// The whole one-screen cockpit. Verdict first; cards are the drill-down.
+/// Weeks of history under which trend metrics are too thin to trust; below it
+/// the board is flagged "provisional". One tunable constant, beside the data it
+/// gates (rather than scattered through the render layer).
+const BASELINE_WEEKS: usize = 3;
+
+/// The whole one-screen cockpit: a status-board of cards, with the survival
+/// foundation below them. No composed verdict — the reader triages the glyphs.
 #[derive(Clone, Debug)]
 pub struct Cockpit {
     pub branch: String,
@@ -150,9 +170,9 @@ pub struct Cockpit {
     /// `--at`: date of the anchor (the window's upper edge); `None` at HEAD. Lets
     /// the report frame its drill-downs as "… to <date>" instead of implying now.
     pub as_of: Option<String>,
-    pub verdict: String,
-    /// The survival curve(s) — S(age) — that weight thrash/excision. Shown right
-    /// under the verdict so the rest of the board has a foundation.
+    /// The survival curve(s) — S(age) — that weight thrash/excision. Shown below
+    /// the indicators, without a status glyph, to mark it as the foundation the
+    /// graded metrics rest on rather than a graded metric itself.
     pub survival: Vec<RepoSurvival>,
     /// `--me`: the board is scoped to the running user (changes survival wording).
     pub personal: bool,
@@ -160,4 +180,12 @@ pub struct Cockpit {
     pub footer: String,
     /// Weeks of history available; drives the coverage-honesty rule.
     pub coverage_weeks: usize,
+}
+
+impl Cockpit {
+    /// Too little history to trust the trends? Both surfaces flag the board
+    /// "provisional" when so; each formats that caveat in its own idiom.
+    pub fn is_provisional(&self) -> bool {
+        self.coverage_weeks < BASELINE_WEEKS
+    }
 }

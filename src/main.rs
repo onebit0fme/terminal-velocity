@@ -1,8 +1,9 @@
 //! terminal velocity (`tv`) — a git-status for build-flow health.
 //!
-//! Cockpit-first: a plain-English verdict, then 3-4 leading indicators, each as
-//! headline + sparkline + where-you-sit-vs-your-own-history + an action or an
-//! explicit "ignore". Mostly quiet; surfaces the one or two things drifting.
+//! Cockpit-first: a dense status board, git-status-shaped — 3-4 leading
+//! indicators, each as a gutter status glyph + headline + sparkline +
+//! where-you-sit-vs-your-own-history + an action or an explicit "ignore". No
+//! composed verdict; the reader triages the glyph column.
 //!
 //! Scaffold status: batch / cadence / net / intent are live (numstat only).
 //! Survival-weighted flow / thrash / excision are wired as pending until the
@@ -18,7 +19,6 @@ mod render;
 mod spark;
 mod style;
 mod survival;
-mod verdict;
 
 use std::collections::HashMap;
 use std::path::Path;
