@@ -20,6 +20,7 @@ hold — not the burst you imagine.
 v∞
 terminal velocity · main · last 7d vs trailing 8wk
 ────────────────────────────────────────────────────────────
+
   ✓  flow      ▁▂▁▁▁█▃   ramping · ~19059 lines/wk
   ▲  batch     ▃▃▄▅▆▆▇   rising · median 190→240 (p78 for you)
         └ split smaller — cheapest flow win
@@ -28,11 +29,14 @@ terminal velocity · main · last 7d vs trailing 8wk
   ✓  excision  ▂█▂▂▁▆▃   healthy · 9.6% of churn
         └ deliberate scope-cutting (healthy)
   ·  cadence   ▁▂▂▃▂▂▃   steady · nights 14% · weekends 9% (local, UTC-4)
+
 ────────────────────────────────────────────────────────────
-code survival  █▇▇▆▆▅▄▄▄▄▃▃▃▁▁▁  half-life ~491c / ~86d · 76% of lines still alive
-  S(age) = a deleted line's odds of having lived this long;
-  thrash and excision weight every death by it.
+
+code survival  █▇▇▆▆▅▄▄▄▄▃▃▃▁▁▁  half-life ~491c / ~86d · 76% alive
+  how long code survives here, fit to this repo · `--explain` to unpack it
+
 ────────────────────────────────────────────────────────────
+
 net +334k (… added, … deleted) · run `tv thrash` / `tv hotspots` to drill in
 ```
 

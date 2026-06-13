@@ -213,10 +213,9 @@ fn print_survival(survivals: &[RepoSurvival], personal: bool, explain: bool, p: 
         print_survival_formula(p);
     } else if survivals.len() == 1 {
         let gloss = if personal {
-            "how long the lines you write survive (S(age) over your own code)."
+            "how long the lines you write survive · `--explain` to unpack it"
         } else {
-            "S(age) = a deleted line's odds of having lived this long; \
-             thrash and excision weight every death by it."
+            "how long code survives here, fit to this repo · `--explain` to unpack it"
         };
         for line in wrap(gloss, p.width - 2) {
             println!("{}", p.dim(&format!("  {line}")));
@@ -348,6 +347,7 @@ fn window_label(recent: bool, as_of: Option<&str>, wk: &str) -> String {
 
 pub fn print_thrash(branch: &str, root: &TreeNode, recent: bool, as_of: Option<&str>, p: &Palette) {
     let window = window_label(recent, as_of, "8wk");
+    println!("{}", p.dim("v∞"));
     println!(
         "{} {}",
         p.bold("tv thrash"),
@@ -517,6 +517,7 @@ pub fn print_hotspots(
     p: &Palette,
 ) {
     let window = window_label(recent, as_of, "8wk");
+    println!("{}", p.dim("v∞"));
     println!(
         "{} {}",
         p.bold("tv hotspots"),
@@ -587,6 +588,7 @@ fn heat_cell(p: &Palette, count: u32, max: u32) -> String {
 
 /// The cadence drill-down: a weekday × hour commit punchcard (local time).
 pub fn print_heatmap(h: &Heatmap, scope: &str, p: &Palette) {
+    println!("{}", p.dim("v∞"));
     println!(
         "{} {}",
         p.bold("tv cadence"),
@@ -696,6 +698,7 @@ not inferred: deploys/incidents/lead-time · people · cross-repo ranks
 /// place against the live board (see [`print_card_explain`]), reusing `TREE_BODY`.
 /// Mirror of the logic in intent.rs / metrics.rs — keep in sync with thresholds.
 pub fn print_explain(p: &Palette) {
+    println!("{}", p.dim("v∞"));
     println!("{}", p.bold("terminal velocity · decision tree"));
     println!("{}", p.dim(&p.rule()));
     print!(
@@ -728,6 +731,7 @@ body{margin:0;background:var(--bg);color:var(--ink);\
 font:15px/1.55 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}\
 .wrap{max-width:720px;margin:0 auto;padding:2.5rem 1.25rem 4rem}\
 h1{font-size:1rem;font-weight:600;margin:0;letter-spacing:.01em}\
+.logo{color:var(--muted);font-size:.8rem;font-weight:600;letter-spacing:.02em}\
 .meta{color:var(--muted);font-size:.85rem;margin-top:.15rem}\
 .asof{display:inline-block;margin-top:.55rem;padding:.22rem .65rem;border-radius:999px;\
 background:var(--watchbg);color:var(--watch);border:1px solid var(--watch);\
@@ -747,8 +751,26 @@ font-size:.8rem;font-weight:600;letter-spacing:.01em;font-variant-numeric:tabula
 .card.good .bar{background:var(--good)}.card.watch .bar{background:var(--watch)}.card.alarm .bar{background:var(--alarm)}\
 .bar.now{opacity:1}\
 .note{color:var(--muted);font-size:.85rem;margin-top:.55rem}\
+details.card>summary{list-style:none;cursor:pointer;display:block}\
+details.card>summary::-webkit-details-marker{display:none}\
+.disc{margin-left:.5rem;color:var(--muted);font-size:.7rem}\
+.disc::before{content:\"\u{25B8}\"}\
+details.card[open] .disc::before{content:\"\u{25BE}\"}\
+.tree{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;\
+font-size:.74rem;line-height:1.55;color:var(--muted);margin:.75rem 0 0;white-space:pre-wrap;overflow-x:auto}\
+.tree b{font-weight:700;color:var(--ink)}\
+.card.good .tree b{color:var(--good)}.card.watch .tree b{color:var(--watch)}.card.alarm .tree b{color:var(--alarm)}\
+.story{margin-top:1rem}\
+.story p{font-size:.9rem;line-height:1.65;margin:0 0 .75rem}\
+details.formula{margin-top:.6rem}\
+details.formula>summary{cursor:pointer;color:var(--muted);font-size:.8rem;font-weight:600}\
+details.formula pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;\
+font-size:.8rem;line-height:1.5;color:var(--ink);margin:.6rem 0 0;overflow-x:auto}\
 footer{margin-top:1.6rem;border-top:1px solid var(--line);padding-top:1rem;color:var(--muted);font-size:.82rem}\
 .safety{margin-top:.5rem;font-size:.77rem}\
+.builtby{margin-top:.7rem}\
+.builtby a{color:var(--ink);text-decoration:none;border-bottom:1px solid var(--line)}\
+.builtby a:hover{border-color:var(--muted)}\
 .section{margin-top:1.9rem}\
 .section h2{font-size:.92rem;font-weight:600;margin:0 0 .15rem;letter-spacing:.01em}\
 .sub{color:var(--muted);font-size:.8rem;margin:0 0 .7rem}\
@@ -812,16 +834,21 @@ pub fn write_report(
             .as_ref()
             .map(|n| format!("<div class=note>{}</div>", esc(n)))
             .unwrap_or_default();
+        // The card is a <details>: the summary is the at-a-glance row + sparkline,
+        // expanding to the metric's decision tree (fired branch lit) — the report's
+        // take on `--explain`, here as native progressive disclosure.
         cards.push_str(&format!(
-            "<div class=\"card {t}\"><div class=row>\
+            "<details class=\"card {t}\"><summary><div class=row>\
                <span class=key>{key}</span>\
                <span class=\"chip {t}\">{state}</span>\
-               <span class=head>{head}</span></div>\
-             <div class=spark>{bars}</div>{note}</div>",
+               <span class=head>{head}</span>\
+               <span class=disc></span></div>\
+             <div class=spark>{bars}</div>{note}</summary>{explain}</details>",
             key = esc(&card.key),
             state = esc(&card.state),
             head = esc(&card.headline),
             bars = spark_bars(&card.spark_values),
+            explain = report_card_explain(card),
         ));
     }
 
@@ -845,16 +872,14 @@ pub fn write_report(
     let (surv_h2, surv_sub) = if c.personal {
         (
             "my code survival — S(age)",
-            "How long the lines you write survive — your own line-lifetime curve. The dashed \
-             line is 50%; where the curve crosses it is the half-life you'd expect of your code. \
-             Fit per repo.",
+            "How long the lines you write survive — your own line-survival curve, fit per repo. \
+             The dashed line is 50%; where the curve crosses it is the half-life.",
         )
     } else {
         (
             "code survival — S(age)",
-            "Every deleted line is weighted by S(age) — its odds of having lived this long, read \
-             off the repo's own line-lifetime curve. The dashed line is 50%; where the curve \
-             crosses it is the half-life. Fit per repo.",
+            "How long code lives in this repo — its own line-survival curve, fit per repo. The \
+             dashed line is 50%; where the curve crosses it is the half-life.",
         )
     };
     let cad_window = match as_of {
@@ -889,9 +914,9 @@ pub fn write_report(
 <meta name=viewport content=\"width=device-width,initial-scale=1\">\
 <title>Terminal Velocity · {branch}</title><style>{css}</style></head>\
 <body><main class=wrap>\
-<header><h1>terminal velocity</h1><div class=meta>{branch} · {window_lbl}</div>{asof_badge}{prov_badge}</header>\
+<header><div class=logo>v∞</div><h1>terminal velocity</h1><div class=meta>{branch} · {window_lbl}</div>{asof_badge}{prov_badge}</header>\
 <section class=section><h2>{surv_h2}</h2>\
-<p class=sub>{surv_sub}</p><div class=panel>{survival}</div></section>\
+<p class=sub>{surv_sub}</p><div class=panel>{survival}</div>{surv_prose}</section>\
 <section class=grid>{cards}</section>\
 <section class=section><h2>cadence — when commits land</h2>\
 <p class=sub>{cad_sub}</p><div class=panel>{cadence}</div></section>\
@@ -900,17 +925,21 @@ pub fn write_report(
 <section class=section><h2>hotspots — refactor targets</h2>\
 <p class=sub>{hot_sub}</p><div class=panel>{hot}</div></section>\
 <footer>{footer}<div class=safety>Self-relative: thresholds are percentiles \
-against this repo's own history, not external benchmarks.</div></footer>\
-</main></body></html>",
+against this repo's own history, not external benchmarks.</div>\
+<div class=builtby>built by <a href=\"https://github.com/onebit0fme\" rel=noopener>@onebit0fme</a></div>\
+</footer></main></body></html>",
         branch = esc(&c.branch),
         window_lbl = esc(&c.window),
         asof_badge = asof_badge,
         prov_badge = prov_badge,
-        footer = esc(&c.footer),
+        // The drill-in hint ("run `tv thrash`…") is nonsense on the web — the
+        // sections are right here. Keep only the net-churn line.
+        footer = esc(c.footer.split(" · run").next().unwrap_or(&c.footer)),
         thr_sub = esc(&thr_sub),
         hot_sub = esc(&hot_sub),
         surv_h2 = esc(surv_h2),
         surv_sub = esc(surv_sub),
+        surv_prose = report_survival_prose(),
         cad_sub = esc(&cad_sub),
         survival = report_survival(&c.survival),
         cadence = report_heatmap(heat),
@@ -921,6 +950,64 @@ against this repo's own history, not external benchmarks.</div></footer>\
 
     fs::write(path, html).map_err(|e| format!("failed to write {path}: {e}"))?;
     Ok(())
+}
+
+/// A card's decision tree as the report's progressive-disclosure body: the metric's
+/// `TREE_BODY` section (header prefix stripped), the fired branch bold, plus the
+/// intent breakdown when present (thrash). Same source the terminal `--explain` uses.
+fn report_card_explain(card: &Card) -> String {
+    let Some(block) = tree_block(&card.key.to_uppercase()) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for (i, line) in block.lines().enumerate() {
+        let text = if i == 0 {
+            line.split_once(" · ").map_or(line, |(_, def)| def)
+        } else {
+            line
+        };
+        let trimmed = line.trim_start();
+        let is_branch = trimmed.starts_with("├─") || trimmed.starts_with("└─");
+        if is_branch && line.contains(card.state.as_str()) {
+            out.push_str(&format!("<b>{}</b>\n", esc(text)));
+        } else {
+            out.push_str(&esc(text));
+            out.push('\n');
+        }
+    }
+    if let Some(d) = &card.detail {
+        out.push_str(&format!("→ {}\n", esc(d)));
+    }
+    format!("<pre class=tree>{out}</pre>")
+}
+
+/// The survival story (the prose model) plus the Kaplan-Meier formula tucked behind
+/// a disclosure at the bottom of the survival section — the web home for the story
+/// the terminal `--explain` tells.
+fn report_survival_prose() -> String {
+    let story: String = SURVIVAL_STORY
+        .iter()
+        .map(|p| format!("<p>{}</p>", esc(p)))
+        .collect();
+    // Built per-line (not a `\`-continued literal — that strips the first line's
+    // leading spaces and breaks the alignment of the stacked formula).
+    let formula = [
+        "           ⎛      dᵢ  ⎞",
+        "  S(t) = ∏ ⎜ 1 − ──── ⎟",
+        "       tᵢ≤t⎝      nᵢ  ⎠",
+        "",
+        "  dᵢ  deaths at age tᵢ    lines excised, not rewritten",
+        "  nᵢ  still at risk        alive and not yet censored",
+        "  t   age                  in commits, or days",
+        "  →   feeds thrash weight w = S(age) · excision weight",
+    ]
+    .join("\n");
+    format!(
+        "<div class=story>{story}</div>\
+         <details class=formula><summary>the math — Kaplan-Meier product-limit</summary>\
+         <pre>{}</pre></details>",
+        esc(&formula)
+    )
 }
 
 /// The cadence punchcard as a CSS grid — opacity scales with commit count, the
