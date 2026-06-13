@@ -86,7 +86,7 @@ quiet, stated plainly, is reassurance you can trust.
 | **net flow** | added − deleted; building vs consolidating | ✅ live |
 | **intent mix** | feature/refactor/fix/… (heuristic) | ✅ live |
 | **flow** | survival-weighted build-flow rate | ✅ live |
-| **thrash** | in-place rewrite, S-weighted (the risk signal) | ✅ live · `tv thrash` by area |
+| **thrash** | in-place rewrite, S-weighted (the risk signal) | ✅ live · `tv thrash` by area · qualified by commit intent |
 | **excision** | wholesale removal (healthy scope-cutting) | ✅ live |
 | **survival** | the S(age) curve + half-life + % still alive (Kaplan-Meier) | ✅ live · the foundation, shown below the indicators |
 | **hotspots** | churn × complexity, by file | ✅ live · `tv hotspots` |

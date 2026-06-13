@@ -2,7 +2,7 @@
 
 /// What kind of work a commit represents. Heuristic today (see `intent`);
 /// the swap-point for a learned classifier (an external API call) later.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Intent {
     Feature,
     Refactor,
@@ -27,6 +27,22 @@ impl Intent {
             Intent::Ops => "ops",
             Intent::Revert => "revert",
             Intent::Other => "other",
+        }
+    }
+
+    /// Inverse of [`label`], for the blame cache. Unknown → `Other` (fail-soft on a
+    /// cache written by a future version that added an intent).
+    pub fn from_label(s: &str) -> Intent {
+        match s {
+            "feature" => Intent::Feature,
+            "refactor" => Intent::Refactor,
+            "fix" => Intent::Fix,
+            "web" => Intent::Web,
+            "docs" => Intent::Docs,
+            "test" => Intent::Test,
+            "ops" => Intent::Ops,
+            "revert" => Intent::Revert,
+            _ => Intent::Other,
         }
     }
 }
@@ -125,6 +141,8 @@ pub struct Card {
     pub tone: Tone,
     /// The one action, OR the explicit "ignore" (both are first-class).
     pub note: Option<String>,
+    /// Extra context shown only under `--explain` (e.g. thrash's intent breakdown).
+    pub detail: Option<String>,
     /// False when the metric needs the full blame pass we haven't run yet.
     pub available: bool,
 }

@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::intent;
-use crate::model::{Commit, Me};
+use crate::model::{Commit, Intent, Me};
 
 const REC: char = '\u{1e}'; // ASCII record separator
 const FLD: char = '\u{1f}'; // ASCII unit separator
@@ -179,6 +179,9 @@ pub struct DeathRecord {
     pub path: String,
     pub kill_a: i32,
     pub intro_a: i32,
+    /// Intent of the commit that did the deleting — lets thrash be qualified by the
+    /// kind of work doing the rewriting (refactor sweep vs bug-fix churn).
+    pub kill_intent: Intent,
 }
 
 /// Everything the survival metrics need. `cens_*` are survivors alive at HEAD;
@@ -410,6 +413,7 @@ fn collect(
                         path: path.clone(),
                         kill_a,
                         intro_a: intro_of(isha),
+                        kill_intent: c.intent,
                     });
                 }
             }
@@ -486,7 +490,7 @@ fn cache_file(repo: &str, key: &str, is_head: bool) -> Option<PathBuf> {
 fn load_cache(path: &Path, head: &str) -> Option<Collection> {
     let data = std::fs::read_to_string(path).ok()?;
     let mut lines = data.lines();
-    let cached_head = lines.next()?.strip_prefix("TVCACHE4 ")?;
+    let cached_head = lines.next()?.strip_prefix("TVCACHE5 ")?;
     if cached_head != head {
         return None;
     }
@@ -506,6 +510,7 @@ fn load_cache(path: &Path, head: &str) -> Option<Collection> {
                 kill_ts: t.next()?.parse().ok()?,
                 kill_a: t.next()?.parse().ok()?,
                 intro_a: t.next()?.parse().ok()?,
+                kill_intent: Intent::from_label(t.next()?),
                 path: t.next()?.to_string(),
             }),
             Some("C") => {
@@ -527,14 +532,21 @@ fn load_cache(path: &Path, head: &str) -> Option<Collection> {
 }
 
 fn save_cache(path: &Path, col: &Collection) -> std::io::Result<()> {
-    let mut s = format!("TVCACHE4 {}\n", col.head);
+    let mut s = format!("TVCACHE5 {}\n", col.head);
     for (email, name) in &col.authors {
         s.push_str(&format!("A\t{email}\t{name}\n"));
     }
     for d in &col.deaths {
         s.push_str(&format!(
-            "D\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-            d.age_c, d.age_t, d.rw, d.kill_ts, d.kill_a, d.intro_a, d.path
+            "D\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            d.age_c,
+            d.age_t,
+            d.rw,
+            d.kill_ts,
+            d.kill_a,
+            d.intro_a,
+            d.kill_intent.label(),
+            d.path
         ));
     }
     for ((c, t), a) in col.cens_c.iter().zip(&col.cens_t).zip(&col.cens_a) {

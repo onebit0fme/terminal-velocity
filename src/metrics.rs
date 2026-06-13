@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::git::Collection;
-use crate::model::{Card, Cockpit, Commit, Heatmap, Me, RepoSurvival, Tone};
+use crate::model::{Card, Cockpit, Commit, Heatmap, Intent, Me, RepoSurvival, Tone};
 use crate::spark::{median, percentile_rank, sparkline};
 use crate::survival::{half_life, km_survival, sample_survival, survival_at};
 
@@ -99,6 +99,9 @@ pub fn build_cockpit(
     let mut exc_tot = 0.0;
     let mut thr_wk: BTreeMap<i64, f64> = BTreeMap::new();
     let mut exc_wk: BTreeMap<i64, f64> = BTreeMap::new();
+    // S-weighted thrash split by the intent of the rewriting commit — the input to
+    // the thrash qualifier (refactor sweep vs bug-fix churn). Same --me masking.
+    let mut thr_by_intent: HashMap<Intent, f64> = HashMap::new();
     let mut survival: Vec<RepoSurvival> = Vec::new();
     for (label, col) in repos {
         // `--me`: keep only deaths I caused (kill_a) for thrash; survival switches
@@ -119,6 +122,7 @@ pub fn build_cockpit(
             exc_tot += w * (1.0 - d.rw);
             *thr_wk.entry(wk).or_default() += w * d.rw;
             *exc_wk.entry(wk).or_default() += w * (1.0 - d.rw);
+            *thr_by_intent.entry(d.kill_intent).or_default() += w * d.rw;
         }
         survival.push(survival_row(label, col, mask.as_deref()));
     }
@@ -126,13 +130,14 @@ pub fn build_cockpit(
     let exc_pct = exc_tot / total_churn * 100.0;
 
     let tz = local_offset_secs();
-    let cards = vec![
+    let mut cards = vec![
         flow_card(&churn_wk),
         batch_card(commits, anchor),
         rate_card("thrash", thr_pct, &thr_wk, &churn_wk, false),
         rate_card("excision", exc_pct, &exc_wk, &churn_wk, true),
         cadence_card(commits, anchor, tz),
     ];
+    qualify_thrash(&mut cards, &thr_by_intent);
 
     let added: i64 = commits.iter().map(|c| c.added).sum();
     let deleted: i64 = commits.iter().map(|c| c.deleted).sum();
@@ -158,6 +163,56 @@ pub fn build_cockpit(
         cards,
         footer,
         coverage_weeks,
+    }
+}
+
+/// Qualify the thrash card by the intent of the *rewriting* work — without moving
+/// the % or the tone, only the words. The breakdown always feeds `--explain` (the
+/// card's `detail`); when one intent owns the thrash (Pareto vital few ≤ 2) it also
+/// rewrites the note — softening a deliberate sweep, sharpening bug-fix churn. A
+/// diffuse mix says nothing, so the bare % keeps the high-level signal. This is the
+/// one place commit intent reaches a surfaced metric.
+fn qualify_thrash(cards: &mut [Card], by_intent: &HashMap<Intent, f64>) {
+    let total: f64 = by_intent.values().sum();
+    let Some(card) = cards.iter_mut().find(|c| c.key == "thrash") else {
+        return;
+    };
+    if total <= 0.0 {
+        return;
+    }
+    let mut items: Vec<(Intent, f64)> = by_intent.iter().map(|(&i, &v)| (i, v)).collect();
+    items.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+    // --explain: the rewrite churn broken down by intent (the top few).
+    let parts: Vec<String> = items
+        .iter()
+        .filter(|(_, v)| *v > 0.0)
+        .take(4)
+        .map(|(i, v)| format!("{} {:.0}%", i.label(), v / total * 100.0))
+        .collect();
+    card.detail = Some(format!("rewrite churn by intent — {}", parts.join(" · ")));
+
+    // Only "mostly X" when X is genuinely concentrated (the 80% vital few is 1–2
+    // intents); otherwise the mix is diffuse and the % stands on its own.
+    let shares: Vec<f64> = items.iter().map(|(_, v)| *v).collect();
+    if pareto_count(&shares, VITAL_FEW) > 2 {
+        return;
+    }
+    let clause = match items[0].0 {
+        Intent::Fix => {
+            Some("mostly fixes — code reworked to clear bugs; stabilize this area".to_string())
+        }
+        Intent::Feature => Some("mostly feature work — reworking new code".to_string()),
+        Intent::Revert | Intent::Other => None,
+        sweep => Some(format!(
+            "mostly {} — a deliberate sweep; sanity-check, then ignore",
+            sweep.label()
+        )),
+    };
+    // Re-note only when the thrash is actually flagged — a low/healthy reading needs
+    // no qualifier. Band and tone are untouched; only the sentence changes.
+    if let (Some(clause), true) = (clause, matches!(card.tone, Tone::Watch | Tone::Alarm)) {
+        card.note = Some(format!("{} · {}", card.state, clause));
     }
 }
 
@@ -289,6 +344,7 @@ fn flow_card(churn_wk: &BTreeMap<i64, f64>) -> Card {
         state,
         tone,
         note,
+        detail: None,
         available: true,
     }
 }
@@ -346,6 +402,7 @@ fn rate_card(
         state: state.to_string(),
         tone,
         note: Some(note),
+        detail: None,
         available: true,
     }
 }
@@ -395,6 +452,7 @@ fn batch_card(commits: &[Commit], anchor: i64) -> Card {
         state,
         tone,
         note,
+        detail: None,
         available: true,
     }
 }
@@ -488,6 +546,7 @@ fn cadence_card(commits: &[Commit], anchor: i64, tz: Option<i64>) -> Card {
         state,
         tone,
         note,
+        detail: None,
         available: true,
     }
 }

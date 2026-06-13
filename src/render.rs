@@ -125,6 +125,11 @@ fn print_card_explain(card: &Card, p: &Palette) {
         };
         println!("     {styled}");
     }
+    // The edge: what feeds this metric (today, only thrash ← intent). Drawing it
+    // here is where `intent` stops being a dead-end in the explain view.
+    if let Some(detail) = &card.detail {
+        println!("     {}", p.dim(&format!("→ {detail}")));
+    }
 }
 
 /// The `TREE_BODY` block (header + branches) for a metric section, e.g. "FLOW".
@@ -640,7 +645,7 @@ how every word in the cockpit is decided.
 ";
 
 const TREE_BODY: &str = "\
-INTENT · per commit, first match wins
+INTENT · per commit, first match wins  (qualifies thrash)
 ├─ subject has \"revert\" ···················· revert
 ├─ subject has fix/bug/resolve/correct ······ fix
 ├─ ○ deleted > 2×added AND >15 lines ········ refactor
