@@ -320,9 +320,13 @@ fn flow_card(churn_wk: &BTreeMap<i64, f64>) -> Card {
     let weekly: Vec<f64> = churn_wk.values().copied().collect();
     let overall = median(&weekly);
     let recent = churn_wk.get(&0).copied().unwrap_or(overall);
-    let state = if recent > overall * 1.25 {
+    // Resolve the ratio cut-points to native units once; read both the state and the
+    // --explain bands off them, so the explanation can't drift from the decision.
+    let ramp_at = overall * 1.25;
+    let slow_at = overall * 0.70;
+    let state = if recent > ramp_at {
         "ramping"
-    } else if recent < overall * 0.7 {
+    } else if recent < slow_at {
         "slowing"
     } else {
         "steady"
@@ -338,13 +342,18 @@ fn flow_card(churn_wk: &BTreeMap<i64, f64>) -> Card {
 
     Card {
         key: "flow".to_string(),
-        headline: format!("~{overall:.0} lines/wk"),
+        // baseline→this-week, so the headline carries the comparison the state word
+        // encodes (mirrors batch's median a→b) rather than only the baseline median.
+        headline: format!("~{overall:.0}→{recent:.0} lines/wk"),
         spark: sparkline(&spark_vals),
         spark_values: spark_vals,
         state,
         tone,
         note,
-        detail: None,
+        // --explain: where this week's bands actually fall, in native units.
+        detail: Some(format!(
+            "ramping above ~{ramp_at:.0}/wk · slowing below ~{slow_at:.0}/wk"
+        )),
         available: true,
     }
 }
@@ -427,9 +436,12 @@ fn batch_card(commits: &[Commit], anchor: i64) -> Card {
     let week_medians: Vec<f64> = by_week.values().map(|v| median(v)).collect();
     let pct = percentile_rank(recent, &week_medians);
 
-    let state = if recent > overall * 1.25 {
+    // Cut-points in native units once; state + --explain bands both read off them.
+    let rise_at = overall * 1.25;
+    let ease_at = overall * 0.80;
+    let state = if recent > rise_at {
         "rising"
-    } else if recent < overall * 0.8 {
+    } else if recent < ease_at {
         "easing"
     } else {
         "steady"
@@ -452,7 +464,10 @@ fn batch_card(commits: &[Commit], anchor: i64) -> Card {
         state,
         tone,
         note,
-        detail: None,
+        // --explain: where this week's bands fall, in native units (lines/commit).
+        detail: Some(format!(
+            "rising above ~{rise_at:.0}/commit · easing below ~{ease_at:.0}/commit"
+        )),
         available: true,
     }
 }
