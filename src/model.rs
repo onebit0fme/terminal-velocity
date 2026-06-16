@@ -164,14 +164,26 @@ pub struct RepoSurvival {
 /// day 0 = Monday, hour 0..23 in local time.
 #[derive(Clone, Debug)]
 pub struct Heatmap {
-    pub counts: Vec<Vec<u32>>, // [7][24]
-    pub max: u32,
+    pub counts: Vec<Vec<u32>>, // [7][24] raw commit counts — the all-time rhythm (shading + peak)
+    pub max: u32,              // busiest cell (rhythm shading denominator)
     pub total: u32,
     pub peak_day: usize,
     pub peak_hour: usize,
     pub tz: String,
-    pub weekend_pct: f64,
-    pub night_pct: f64,
+    /// Per-weekday `[7]` and per-hour `[24]` *shift*: the standardized residual of recent
+    /// (recency-weighted) activity vs that margin's own all-time rate,
+    /// z = (recent − expected)/√expected. > 0 = that day / that hour is heating (busier
+    /// lately than its usual share), < 0 = cooling, ~0 = steady. Marked on the grid's axes,
+    /// not a second grid — a whole-day / whole-hour margin is a far larger, more stable
+    /// sample than any single cell, so it reports a real trend, not cell noise. ±4σ clamp.
+    pub day_shift: Vec<f64>,
+    pub hour_shift: Vec<f64>,
+    /// Weekend/night commit share — all-time (the rhythm) and recency-weighted "lately"
+    /// (the recent vector, reconciles with the cockpit cadence card). Shown as `a→b`.
+    pub weekend_all: f64,
+    pub night_all: f64,
+    pub weekend_lately: f64,
+    pub night_lately: f64,
 }
 
 /// Weeks of history under which trend metrics are too thin to trust; below it

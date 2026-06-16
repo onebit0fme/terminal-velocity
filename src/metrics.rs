@@ -4,11 +4,76 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::git::Collection;
 use crate::model::{Card, Cockpit, Commit, Heatmap, Intent, Me, RepoSurvival, Tone};
-use crate::spark::{median, percentile_rank, sparkline};
+use crate::spark::{median, sparkline, weighted_median, wilson};
 use crate::survival::{half_life, km_survival, sample_survival, survival_at};
 
 const DAY: i64 = 86_400;
 const WEEK: i64 = 7 * DAY;
+
+/// Recency half-life: the calendar time over which a behavior's weight halves. Fixed,
+/// NOT scaled by repo age — that is the whole point. It makes "how I've been working
+/// lately" repo-age-independent and responsive within ~1 half-life (spike: ~21d reaches
+/// halfway to a step change in ~4 weeks), instead of an all-history average an old repo
+/// can never move. Decays by wall-clock, not commit count, so a burst of commits can't
+/// age out real history. The 8-week sparkline carries the slower context.
+pub const RECENCY_HALFLIFE_DAYS: f64 = 21.0;
+
+/// A plain-language anchor table for the recency weighting (for `--explain` / the
+/// report): a commit's pull on every figure, by age, vs one made today — the weight
+/// halves every half-life. Built from the one constant so it can never drift. e.g.
+/// "today 100% · 3wk 50% · 6wk 25% · 8wk 16% · 3mo 5% · 1yr ~0%".
+pub fn recency_anchors() -> String {
+    [
+        ("today", 0.0),
+        ("3wk", 21.0),
+        ("6wk", 42.0),
+        ("8wk", 56.0),
+        ("3mo", 91.0),
+        ("1yr", 365.0),
+    ]
+    .iter()
+    .map(|(label, days)| {
+        let w = 0.5_f64.powf(days / RECENCY_HALFLIFE_DAYS) * 100.0;
+        if w >= 1.0 {
+            format!("{label} {w:.0}%")
+        } else {
+            format!("{label} ~0%")
+        }
+    })
+    .collect::<Vec<_>>()
+    .join(" · ")
+}
+
+/// Calendar-time recency weight for a timestamp: 1.0 at the anchor (newest commit),
+/// halving every [`RECENCY_HALFLIFE_DAYS`]. Future timestamps clamp to the anchor.
+pub fn recency(ts: i64, anchor: i64) -> f64 {
+    const LAMBDA: f64 = std::f64::consts::LN_2 / (RECENCY_HALFLIFE_DAYS * DAY as f64);
+    (-LAMBDA * (anchor - ts).max(0) as f64).exp()
+}
+
+/// The recency lens as a reusable weight closure: `recency(ts, anchor)` by default, a flat
+/// `1.0` under `--all`. Built once per anchor and threaded into every metric so the "one
+/// lens, all surfaces reconcile" rule is structural rather than copy-pasted per call site.
+pub fn recency_lens(all_time: bool, anchor: i64) -> impl Fn(i64) -> f64 + Copy {
+    move |ts| if all_time { 1.0 } else { recency(ts, anchor) }
+}
+
+/// Recency weight for a whole week bucket `wk` weeks before the anchor (0 = current) —
+/// the per-week form of [`recency`], same half-life. Used for flow/batch "typical".
+fn week_decay(wk: i64) -> f64 {
+    (-std::f64::consts::LN_2 * (wk as f64) * 7.0 / RECENCY_HALFLIFE_DAYS).exp()
+}
+
+/// Effective sample size of a weighted set, `(Σw)² / Σw²` — how many commits actually
+/// back a recency-weighted rate (≈ the count when weights are flat, far fewer when a
+/// handful of recent commits dominate). One definition, shared by every honesty band.
+fn effective_n(sw: f64, sw2: f64) -> f64 {
+    if sw2 > 0.0 {
+        sw * sw / sw2
+    } else {
+        0.0
+    }
+}
 
 fn hour_of(ts: i64) -> i64 {
     ts.rem_euclid(DAY) / 3600
@@ -81,16 +146,20 @@ pub fn build_cockpit(
     let min_ts = commits.iter().map(|c| c.ts).min().unwrap_or(anchor);
     let coverage_weeks = ((anchor - min_ts).div_euclid(WEEK) + 1).max(1) as usize;
 
-    // weekly churn — shared by flow and the thrash/excision rates
+    // weekly churn (sparkline) + recency-weighted churn and effective recent-commit
+    // count — the latter two are the thrash/excision denominator and its honesty band.
+    // One pass. `n_eff = (Σw)²/Σw²` is how much recent data actually backs the rate.
     let mut churn_wk: BTreeMap<i64, f64> = BTreeMap::new();
+    let (mut churn_recent, mut sw, mut sw2) = (0.0_f64, 0.0_f64, 0.0_f64);
     for c in commits {
         *churn_wk.entry(week_bucket(c.ts, anchor)).or_default() += c.churn() as f64;
+        let w = recency(c.ts, anchor);
+        churn_recent += w * c.churn() as f64;
+        sw += w;
+        sw2 += w * w;
     }
-    let total_churn: f64 = commits
-        .iter()
-        .map(|c| c.churn() as f64)
-        .sum::<f64>()
-        .max(1.0);
+    let churn_recent = churn_recent.max(1.0);
+    let n_eff_commits = effective_n(sw, sw2);
 
     // Survival is fit PER REPO and the weighted rework summed — never a pooled
     // curve (repo frailty differs). Commit clock drives weighting + half-life;
@@ -116,25 +185,29 @@ pub fn build_cockpit(
                     continue;
                 }
             }
-            let w = survival_at(&tc, &sc, d.age_c);
+            let w_surv = survival_at(&tc, &sc, d.age_c);
             let wk = week_bucket(d.kill_ts, anchor);
+            // Per-week maps feed the sparkline (each week's own value) — survival-weighted
+            // only. The totals are *also* recency-weighted, so the headline % reads
+            // "lately": recent rework outweighs ancient, and an old repo can still move.
+            *thr_wk.entry(wk).or_default() += w_surv * d.rw;
+            *exc_wk.entry(wk).or_default() += w_surv * (1.0 - d.rw);
+            let w = w_surv * recency(d.kill_ts, anchor);
             thr_tot += w * d.rw;
             exc_tot += w * (1.0 - d.rw);
-            *thr_wk.entry(wk).or_default() += w * d.rw;
-            *exc_wk.entry(wk).or_default() += w * (1.0 - d.rw);
             *thr_by_intent.entry(d.kill_intent).or_default() += w * d.rw;
         }
         survival.push(survival_row(label, col, mask.as_deref()));
     }
-    let thr_pct = thr_tot / total_churn * 100.0;
-    let exc_pct = exc_tot / total_churn * 100.0;
+    let thr_pct = thr_tot / churn_recent * 100.0;
+    let exc_pct = exc_tot / churn_recent * 100.0;
 
     let tz = local_offset_secs();
     let mut cards = vec![
         flow_card(&churn_wk),
         batch_card(commits, anchor),
-        rate_card("thrash", thr_pct, &thr_wk, &churn_wk, false),
-        rate_card("excision", exc_pct, &exc_wk, &churn_wk, true),
+        rate_card("thrash", thr_pct, &thr_wk, &churn_wk, false, n_eff_commits),
+        rate_card("excision", exc_pct, &exc_wk, &churn_wk, true, n_eff_commits),
         cadence_card(commits, anchor, tz),
     ];
     qualify_thrash(&mut cards, &thr_by_intent);
@@ -150,13 +223,10 @@ pub fn build_cockpit(
 
     Cockpit {
         branch: branch.to_string(),
-        // The branch label already carries the "as of <date>" when anchored, so
-        // the window just drops the now-implying "last".
-        window: if as_of.is_some() {
-            "7d vs trailing 8wk".to_string()
-        } else {
-            "last 7d vs trailing 8wk".to_string()
-        },
+        // Every figure is on one lens — recency-weighted toward the last few weeks (the
+        // exact half-life rides `--explain`); the sparklines show the 8-week trend. The
+        // branch label already carries "as of <date>" when anchored.
+        window: "lately · recent weeks weighted most".to_string(),
         as_of: as_of.map(str::to_string),
         survival,
         personal: me.is_some(),
@@ -183,14 +253,19 @@ fn qualify_thrash(cards: &mut [Card], by_intent: &HashMap<Intent, f64>) {
     let mut items: Vec<(Intent, f64)> = by_intent.iter().map(|(&i, &v)| (i, v)).collect();
     items.sort_by(|a, b| b.1.total_cmp(&a.1));
 
-    // --explain: the rewrite churn broken down by intent (the top few).
+    // --explain: the rewrite churn broken down by intent (the top few), composed onto
+    // the recency band rate_card already set (don't clobber it — both feed --explain).
     let parts: Vec<String> = items
         .iter()
         .filter(|(_, v)| *v > 0.0)
         .take(4)
         .map(|(i, v)| format!("{} {:.0}%", i.label(), v / total * 100.0))
         .collect();
-    card.detail = Some(format!("rewrite churn by intent — {}", parts.join(" · ")));
+    let intent = format!("by intent — {}", parts.join(" · "));
+    card.detail = Some(match card.detail.take() {
+        Some(band) => format!("{intent} · {band}"),
+        None => intent,
+    });
 
     // Only "mostly X" when X is genuinely concentrated (the 80% vital few is 1–2
     // intents); otherwise the mix is diffuse and the % stands on its own.
@@ -216,24 +291,30 @@ fn qualify_thrash(cards: &mut [Card], by_intent: &HashMap<Intent, f64>) {
     }
 }
 
+/// Display clamp for the shift residual (σ): caps how far a margin's z-score can read so a
+/// tiny-expected outlier can't blow out the scale. Sits just past `render`'s strong-shift
+/// cut — the same σ scale, named rather than inline.
+const SHIFT_CLAMP_SIGMA: f64 = 4.0;
+
 /// Weekday × hour commit punchcard (local time) — the `cadence` drill-down.
 /// Aggregates all commits given; cadence is a rhythm, read across full history.
 pub fn cadence_heatmap(commits: &[Commit]) -> Heatmap {
     let tz = local_offset_secs();
     let off = tz.unwrap_or(0);
+    let anchor = commits.iter().map(|c| c.ts).max().unwrap_or(0);
     let mut counts = vec![vec![0u32; 24]; 7];
-    let (mut total, mut weekend, mut night) = (0u32, 0u32, 0u32);
+    let mut wsum = vec![vec![0.0_f64; 24]; 7]; // recency-weighted, for the per-margin shift residuals
+    let (mut total, mut total_w) = (0u32, 0.0_f64);
     for c in commits {
         let lt = c.ts + off;
-        counts[weekday_mon0(lt) as usize][hour_of(lt) as usize] += 1;
+        let (d, h) = (weekday_mon0(lt) as usize, hour_of(lt) as usize);
+        counts[d][h] += 1;
         total += 1;
-        if is_weekend(lt) {
-            weekend += 1;
-        }
-        if is_night(lt) {
-            night += 1;
-        }
+        let w = recency(c.ts, anchor);
+        wsum[d][h] += w;
+        total_w += w;
     }
+    // The rhythm grid is the all-time pattern — raw counts, where the medium is strongest.
     let (mut max, mut peak_day, mut peak_hour) = (0u32, 0usize, 0usize);
     for (d, row) in counts.iter().enumerate() {
         for (h, &n) in row.iter().enumerate() {
@@ -244,7 +325,37 @@ pub fn cadence_heatmap(commits: &[Commit]) -> Heatmap {
             }
         }
     }
-    let denom = total.max(1) as f64;
+    // The *shift* is the dynamic, but read on the margins rather than per cell: for each
+    // whole weekday and each whole hour-of-day, how *surprising* its recent activity is vs
+    // that margin's own historical rate — a standardized residual z = (recent − expected) /
+    // √expected, expected = the margin's all-time share × the recent volume. A margin (a
+    // day, an hour) pools ~24×/~7× the samples of one cell, so the trend is stable: it says
+    // which days and which hours are heating/cooling — marked on the grid's own axes, no
+    // second grid. The residual is sample-size aware (a busy margin needs a bigger move to
+    // register; a stable one reads ~0), and margins below 0.5 expected stay steady. ±4σ.
+    let marg_z = |recent: f64, count: u32| -> f64 {
+        let expected = if total > 0 {
+            count as f64 / total as f64 * total_w
+        } else {
+            0.0
+        };
+        if expected >= 0.5 {
+            ((recent - expected) / expected.sqrt()).clamp(-SHIFT_CLAMP_SIGMA, SHIFT_CLAMP_SIGMA)
+        } else {
+            0.0
+        }
+    };
+    let day_shift: Vec<f64> = (0..7)
+        .map(|d| marg_z(wsum[d].iter().sum(), counts[d].iter().sum()))
+        .collect();
+    let hour_shift: Vec<f64> = (0..24)
+        .map(|h| {
+            let recent: f64 = (0..7).map(|d| wsum[d][h]).sum();
+            let count: u32 = (0..7).map(|d| counts[d][h]).sum();
+            marg_z(recent, count)
+        })
+        .collect();
+    let s = cadence_shares(commits, off, anchor);
     Heatmap {
         counts,
         max,
@@ -252,8 +363,12 @@ pub fn cadence_heatmap(commits: &[Commit]) -> Heatmap {
         peak_day,
         peak_hour,
         tz: tz_label(tz),
-        weekend_pct: weekend as f64 / denom * 100.0,
-        night_pct: night as f64 / denom * 100.0,
+        day_shift,
+        hour_shift,
+        weekend_all: s.weekend_all,
+        night_all: s.night_all,
+        weekend_lately: s.weekend_lately,
+        night_lately: s.night_lately,
     }
 }
 
@@ -313,17 +428,34 @@ fn weekly_spark(f: impl Fn(i64) -> Option<f64>) -> Vec<f64> {
     v.into_iter().map(|x| x.1).collect()
 }
 
-/// Weekly throughput (total churn/week) — a steadiness pulse, self-relative.
+/// "This week is ramping/rising" cut: above `typical × this` flow reads ramping and batch
+/// reads rising. Shared by both cards (the low-side multiplier differs per card and stays
+/// local) so the one threshold both lean on can't drift between them.
+const TREND_RAMP_MULT: f64 = 1.25;
+
+/// Weekly throughput: this week's churn vs your *recent-typical* weekly churn. "Typical"
+/// is a recency-weighted median of the prior weeks (recent weeks count most), so an aging
+/// repo's baseline tracks how you work now — not a flat all-history median.
 fn flow_card(churn_wk: &BTreeMap<i64, f64>) -> Card {
     let spark_vals = weekly_spark(|wk| churn_wk.get(&wk).copied());
 
-    let weekly: Vec<f64> = churn_wk.values().copied().collect();
-    let overall = median(&weekly);
-    let recent = churn_wk.get(&0).copied().unwrap_or(overall);
-    // Resolve the ratio cut-points to native units once; read both the state and the
-    // --explain bands off them, so the explanation can't drift from the decision.
-    let ramp_at = overall * 1.25;
-    let slow_at = overall * 0.70;
+    // Typical = recency-weighted median of the *prior* weeks (exclude the current week, so
+    // a busy/quiet week doesn't define its own baseline). Falls back to this week alone.
+    let prior: Vec<(f64, f64)> = churn_wk
+        .iter()
+        .filter(|(&wk, _)| wk >= 1)
+        .map(|(&wk, &ch)| (ch, week_decay(wk)))
+        .collect();
+    let recent = churn_wk.get(&0).copied();
+    let typical = if prior.is_empty() {
+        recent.unwrap_or(0.0)
+    } else {
+        weighted_median(&prior)
+    };
+    let recent = recent.unwrap_or(typical); // partial/empty current week → no false "slowing"
+
+    let ramp_at = typical * TREND_RAMP_MULT;
+    let slow_at = typical * 0.70;
     let state = if recent > ramp_at {
         "ramping"
     } else if recent < slow_at {
@@ -342,29 +474,48 @@ fn flow_card(churn_wk: &BTreeMap<i64, f64>) -> Card {
 
     Card {
         key: "flow".to_string(),
-        // baseline→this-week, so the headline carries the comparison the state word
-        // encodes (mirrors batch's median a→b) rather than only the baseline median.
-        headline: format!("~{overall:.0}→{recent:.0} lines/wk"),
+        headline: format!("this week ~{recent:.0}/wk · typical ~{typical:.0}"),
         spark: sparkline(&spark_vals),
         spark_values: spark_vals,
         state,
         tone,
         note,
-        // --explain: where this week's bands actually fall, in native units.
+        // --explain: where this week's bands fall, in native units.
         detail: Some(format!(
-            "ramping above ~{ramp_at:.0}/wk · slowing below ~{slow_at:.0}/wk"
+            "ramps above ~{ramp_at:.0}/wk · slows below ~{slow_at:.0}/wk"
         )),
         available: true,
     }
 }
 
-/// Thrash / excision as a % of churn, with a weekly-rate sparkline.
+/// Thrash/excision band cut-points (% of recent churn). One source for the cockpit card
+/// (`rate_card`) and the drill-down tree-bar color (`render::thr_tone`), so the board and
+/// `tv thrash` grade the same percentage identically (the tree advertises "same lens as
+/// `tv status`"). Below ELEVATED = healthy throughput; ELEVATED..HIGH = worth a look;
+/// HIGH+ = act now. Excision reuses the same cuts with different wording.
+pub const THRASH_ELEVATED_PCT: f64 = 8.0;
+pub const THRASH_HIGH_PCT: f64 = 15.0;
+
+/// Cadence "heavy" cut-points: a recency-weighted weekend/night commit share above these
+/// flags the board (a burnout tripwire, not a verdict). Same class of grade cut as
+/// `THRASH_*` — one documented home rather than a function-local literal.
+const WEEKEND_HEAVY: f64 = 0.35;
+const NIGHT_HEAVY: f64 = 0.25;
+
+/// Thrash / excision as a recency-weighted % of recent churn, with a weekly-rate
+/// sparkline. Two halves of the same "code that didn't last", split by `rw`: thrash =
+/// rewritten in place (instability), excision = removed outright. Both are S-weighted,
+/// which up-weights *young* deaths — so a high reading means recent, normally-durable
+/// code is being reworked (thrash) or pulled (excision), not old cruft. The verdict
+/// reads off the point estimate so it agrees with the number shown; the Wilson band +
+/// `n_eff` ride `--explain`, and the board's `provisional` chip flags thin history.
 fn rate_card(
     key: &str,
     pct: f64,
     wk_map: &BTreeMap<i64, f64>,
     churn_wk: &BTreeMap<i64, f64>,
-    healthy: bool,
+    is_excision: bool,
+    n_eff: f64,
 ) -> Card {
     let spark_vals = weekly_spark(|wk| {
         churn_wk.get(&wk).map(|&ch| {
@@ -377,68 +528,99 @@ fn rate_card(
         })
     });
 
-    let (state, note) = if healthy {
-        ("healthy", "deliberate scope-cutting (healthy)".to_string())
-    } else if pct < 8.0 {
-        (
-            "low",
-            "low — your speed is real throughput, not thrashing".to_string(),
-        )
-    } else if pct < 15.0 {
-        (
-            "elevated",
-            "elevated — likely a rename/format sweep; sanity-check the area".to_string(),
-        )
-    } else {
+    // Same band cut-points for both halves (same quantity — S-weighted % of churn); the
+    // wording differs because removal is ambiguous where rewrite isn't. Excision: a bit
+    // is healthy scope-cutting; a lot of *recent* code pulled is decisive cleanup OR
+    // false starts — git can't tell which, so it's a "look", not an alarm.
+    let (state, note, tone) = if is_excision {
+        if pct >= THRASH_HIGH_PCT {
+            (
+                "heavy",
+                "heavy removal — decisive cleanup, or false starts? worth a look".to_string(),
+                Tone::Watch,
+            )
+        } else if pct >= THRASH_ELEVATED_PCT {
+            (
+                "pruning",
+                "pruning — healthy scope-cutting on recent work".to_string(),
+                Tone::Good,
+            )
+        } else {
+            (
+                "low",
+                "low — little recent work pulled back out".to_string(),
+                Tone::Calm,
+            )
+        }
+    } else if pct >= THRASH_HIGH_PCT {
         (
             "high",
             "high — recent code being rewritten; stabilize before adding".to_string(),
+            Tone::Alarm,
+        )
+    } else if pct >= THRASH_ELEVATED_PCT {
+        (
+            "elevated",
+            "elevated — likely a rename/format sweep; sanity-check the area".to_string(),
+            Tone::Watch,
+        )
+    } else {
+        (
+            "low",
+            "low — your speed is real throughput, not thrashing".to_string(),
+            Tone::Good,
         )
     };
 
-    let tone = if healthy || pct < 8.0 {
-        Tone::Good
-    } else if pct < 15.0 {
-        Tone::Watch
-    } else {
-        Tone::Alarm
-    };
+    // --explain: the Wilson confidence band (proxy — these are churn-weighted, not pure
+    // Bernoulli — so n_eff stands in as effective sample size).
+    let (lo, hi) = wilson(pct / 100.0, n_eff);
+    let detail = Some(format!(
+        "~{pct:.1}% [{:.1}–{:.1}%] of recent churn · n_eff {n_eff:.0}",
+        lo * 100.0,
+        hi * 100.0
+    ));
     Card {
         key: key.to_string(),
-        headline: format!("{pct:.1}% of churn"),
+        headline: format!("~{pct:.1}% of recent churn"),
         spark: sparkline(&spark_vals),
         spark_values: spark_vals,
         state: state.to_string(),
         tone,
         note: Some(note),
-        detail: None,
+        detail,
         available: true,
     }
 }
 
+/// Batch size: this week's median lines/commit vs your *recent-typical* (recency-weighted
+/// median of prior commits, recent weighted most). Smaller = faster flow.
 fn batch_card(commits: &[Commit], anchor: i64) -> Card {
     let mut by_week: BTreeMap<i64, Vec<f64>> = BTreeMap::new();
-    let mut all: Vec<f64> = Vec::with_capacity(commits.len());
     for c in commits {
-        let churn = c.churn() as f64;
-        all.push(churn);
         by_week
             .entry(week_bucket(c.ts, anchor))
             .or_default()
-            .push(churn);
+            .push(c.churn() as f64);
     }
-
-    let overall = median(&all);
-    let recent = by_week.get(&0).map(|v| median(v)).unwrap_or(overall);
-
     let spark_vals = weekly_spark(|wk| by_week.get(&wk).map(|v| median(v)));
 
-    let week_medians: Vec<f64> = by_week.values().map(|v| median(v)).collect();
-    let pct = percentile_rank(recent, &week_medians);
+    // Typical = recency-weighted median of prior-week commits (exclude the current week).
+    let prior: Vec<(f64, f64)> = commits
+        .iter()
+        .filter(|c| week_bucket(c.ts, anchor) >= 1)
+        .map(|c| (c.churn() as f64, recency(c.ts, anchor)))
+        .collect();
+    let recent = by_week.get(&0).map(|v| median(v));
+    let typical = if prior.is_empty() {
+        recent.unwrap_or(0.0)
+    } else {
+        weighted_median(&prior)
+    };
+    let recent = recent.unwrap_or(typical);
 
-    // Cut-points in native units once; state + --explain bands both read off them.
-    let rise_at = overall * 1.25;
-    let ease_at = overall * 0.80;
+    let rise_at = typical * TREND_RAMP_MULT;
+    let ease_at = typical * 0.80;
     let state = if recent > rise_at {
         "rising"
     } else if recent < ease_at {
@@ -448,9 +630,7 @@ fn batch_card(commits: &[Commit], anchor: i64) -> Card {
     }
     .to_string();
 
-    let headline = format!("median {overall:.0}→{recent:.0} (p{pct:.0} for you)");
     let note = (state == "rising").then(|| "split smaller — cheapest flow win".to_string());
-
     let tone = match state.as_str() {
         "rising" => Tone::Watch,
         "easing" => Tone::Good,
@@ -458,46 +638,76 @@ fn batch_card(commits: &[Commit], anchor: i64) -> Card {
     };
     Card {
         key: "batch".to_string(),
-        headline,
+        headline: format!("this week ~{recent:.0}/commit · typical ~{typical:.0}"),
         spark: sparkline(&spark_vals),
         spark_values: spark_vals,
         state,
         tone,
         note,
-        // --explain: where this week's bands fall, in native units (lines/commit).
         detail: Some(format!(
-            "rising above ~{rise_at:.0}/commit · easing below ~{ease_at:.0}/commit"
+            "rises above ~{rise_at:.0}/commit · eases below ~{ease_at:.0}/commit"
         )),
         available: true,
     }
 }
 
+/// Weekend & night commit shares (local time): the all-time rate and the recency-weighted
+/// "lately" rate, plus `n_eff` (effective recent commits). One source for both the cadence
+/// card and the punchcard, so the card's "lately" and the punchcard's can't drift.
+struct CadenceShares {
+    weekend_all: f64,
+    night_all: f64,
+    weekend_lately: f64,
+    night_lately: f64,
+    n_eff: f64,
+}
+
+fn cadence_shares(commits: &[Commit], off: i64, anchor: i64) -> CadenceShares {
+    let (mut n, mut we_n, mut ni_n) = (0.0_f64, 0.0_f64, 0.0_f64);
+    let (mut sw, mut sw2, mut sw_we, mut sw_ni) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+    for c in commits {
+        let lt = c.ts + off;
+        let (we, ni) = (is_weekend(lt), is_night(lt));
+        let w = recency(c.ts, anchor);
+        n += 1.0;
+        sw += w;
+        sw2 += w * w;
+        if we {
+            we_n += 1.0;
+            sw_we += w;
+        }
+        if ni {
+            ni_n += 1.0;
+            sw_ni += w;
+        }
+    }
+    let frac = |num: f64, den: f64| if den > 0.0 { num / den } else { 0.0 };
+    CadenceShares {
+        weekend_all: frac(we_n, n),
+        night_all: frac(ni_n, n),
+        weekend_lately: frac(sw_we, sw),
+        night_lately: frac(sw_ni, sw),
+        n_eff: effective_n(sw, sw2),
+    }
+}
+
+/// Recency-weighted night / weekend share — "how I've been working lately", not a
+/// cumulative average an aging repo can't move. The "heavy" call reads off the share
+/// itself (point estimate) so it agrees with the number shown; the Wilson band + the
+/// `provisional` chip carry confidence. The 8-week night sparkline is the slow view.
 fn cadence_card(commits: &[Commit], anchor: i64, tz: Option<i64>) -> Card {
     let off = tz.unwrap_or(0);
-    let mut by_week: BTreeMap<i64, (i64, i64)> = BTreeMap::new(); // (night, total)
-    let mut tot_night = 0_i64;
-    let mut tot_weekend = 0_i64;
+    let s = cadence_shares(commits, off, anchor);
+    let (weekend, night, n_eff) = (s.weekend_lately, s.night_lately, s.n_eff);
+
+    let mut by_week: BTreeMap<i64, (i64, i64)> = BTreeMap::new(); // (night, total) per week
     for c in commits {
         let e = by_week.entry(week_bucket(c.ts, anchor)).or_insert((0, 0));
         e.1 += 1;
         if is_night(c.ts + off) {
             e.0 += 1;
-            tot_night += 1;
-        }
-        if is_weekend(c.ts + off) {
-            tot_weekend += 1;
         }
     }
-    let total = commits.len().max(1) as f64;
-    let baseline_night = tot_night as f64 / total * 100.0;
-    let weekend_pct = tot_weekend as f64 / total * 100.0;
-
-    let recent: Vec<&Commit> = commits.iter().filter(|c| c.ts >= anchor - WEEK).collect();
-    let recent_night = if recent.is_empty() {
-        baseline_night
-    } else {
-        recent.iter().filter(|c| is_night(c.ts + off)).count() as f64 / recent.len() as f64 * 100.0
-    };
 
     let spark_vals = weekly_spark(|w| {
         by_week.get(&w).map(|(n, t)| {
@@ -509,59 +719,56 @@ fn cadence_card(commits: &[Commit], anchor: i64, tz: Option<i64>) -> Card {
         })
     });
 
-    // Flag both drift (recent night share climbing) and sustained high level —
-    // for a solo builder the *level* of night/weekend work is the real signal,
-    // and a chronically-high-but-stable level won't show up as drift.
-    let rising = recent_night > baseline_night + 7.0;
-    let heavy_weekend = weekend_pct > 35.0;
-    let heavy_night = baseline_night > 25.0;
+    // Verdict reads off the recency-weighted share itself, so it always agrees with the
+    // number shown. The Wilson band (and the board's `provisional` chip) carry confidence.
+    let heavy_weekend = weekend > WEEKEND_HEAVY;
+    let heavy_night = night > NIGHT_HEAVY;
 
-    let state = if rising {
-        "nights ↑"
-    } else if heavy_weekend || heavy_night {
-        "heavy"
+    let (state, tone) = if heavy_weekend || heavy_night {
+        ("heavy", Tone::Watch)
     } else {
-        "steady"
-    }
-    .to_string();
-    let tone = if rising || heavy_weekend || heavy_night {
-        Tone::Watch
-    } else {
-        Tone::Calm
+        ("steady", Tone::Calm)
     };
-
-    let note = if rising {
-        Some(format!(
-            "night share climbing {baseline_night:.0}→{recent_night:.0}% — protect rest"
-        ))
-    } else if heavy_weekend || heavy_night {
+    let note = (heavy_weekend || heavy_night).then(|| {
         let mut parts = Vec::new();
         if heavy_weekend {
-            parts.push(format!("{weekend_pct:.0}% of commits on weekends"));
+            parts.push(format!("{:.0}% weekends", weekend * 100.0));
         }
         if heavy_night {
-            parts.push(format!("{baseline_night:.0}% at night"));
+            parts.push(format!("{:.0}% nights", night * 100.0));
         }
-        Some(format!("{} — protect recovery time", parts.join(" · ")))
-    } else {
-        None
-    };
+        format!("{} lately — protect recovery time", parts.join(" · "))
+    });
 
-    // headline shows the sustained level (all-time), not the 7-day window
     let headline = format!(
-        "nights {baseline_night:.0}% · weekends {weekend_pct:.0}% ({})",
+        "nights ~{:.0}% · weekends ~{:.0}% ({})",
+        night * 100.0,
+        weekend * 100.0,
         tz_label(tz)
     );
+    // --explain: the Wilson confidence band on each share (n_eff = effective recent commits).
+    let (wk_lo, wk_hi) = wilson(weekend, n_eff);
+    let (nt_lo, nt_hi) = wilson(night, n_eff);
+    let detail = Some(format!(
+        "weekends ~{:.0}% [{:.0}–{:.0}%] · nights ~{:.0}% [{:.0}–{:.0}%] · n_eff {:.0}",
+        weekend * 100.0,
+        wk_lo * 100.0,
+        wk_hi * 100.0,
+        night * 100.0,
+        nt_lo * 100.0,
+        nt_hi * 100.0,
+        n_eff
+    ));
 
     Card {
         key: "cadence".to_string(),
         headline,
         spark: sparkline(&spark_vals),
         spark_values: spark_vals,
-        state,
+        state: state.to_string(),
         tone,
         note,
-        detail: None,
+        detail,
         available: true,
     }
 }
@@ -575,6 +782,18 @@ pub struct TreeNode {
     pub excision: f64,
     pub churn: f64,
     pub children: BTreeMap<String, TreeNode>,
+}
+
+impl TreeNode {
+    /// Thrash as a % of this folder's churn — the node's defining ratio (0 when no churn).
+    /// One definition so the terminal and report read the same number at every node.
+    pub fn thrash_pct(&self) -> f64 {
+        if self.churn > 0.0 {
+            self.thrash / self.churn * 100.0
+        } else {
+            0.0
+        }
+    }
 }
 
 /// Directory segments of a path; root-level files bucket under "(root)".
@@ -622,14 +841,16 @@ fn repo_segments(label: &str, path: &str, multi: bool) -> Vec<String> {
     }
 }
 
-/// Build the folder tree of S-weighted thrash. The root holds the totals; every
-/// node holds the thrash (and churn, for the %) of its whole subtree. Each repo's
-/// rework is weighted by its OWN survival curve, and (when several) sits under a
-/// top-level node named for the repo.
+/// Build the folder tree of thrash, on the *same lens as the cockpit* so the root
+/// reconciles with the `tv status` thrash card: each death weighted by survival ×
+/// recency (`all_time` drops the recency factor → flat lifetime totals), over all
+/// history. The churn denominator arrives pre-weighted on the same lens. Each repo's
+/// rework uses its OWN survival curve, and (when several) sits under a repo node.
 pub fn thrash_tree(
     repos: &[(String, Collection)],
     churn: &[RepoChurn],
-    since: Option<i64>,
+    anchor: i64,
+    all_time: bool,
     recent_cut: Option<i64>,
     multi: bool,
     me: Option<&Me>,
@@ -640,15 +861,17 @@ pub fn thrash_tree(
         let ev_c: Vec<f64> = col.deaths.iter().map(|d| d.age_c).collect();
         let (tc, sc) = km_survival(&ev_c, &col.cens_c); // per-repo S (full calibration)
         for d in &col.deaths {
-            if since.is_some_and(|cut| d.kill_ts < cut) {
-                continue; // only aggregate rewrites inside the window
-            }
             if let Some(m) = &mask {
                 if !(d.kill_a >= 0 && m[d.kill_a as usize]) {
                     continue; // --me: only rework I did
                 }
             }
-            let w = survival_at(&tc, &sc, d.age_c);
+            let r = if all_time {
+                1.0
+            } else {
+                recency(d.kill_ts, anchor)
+            };
+            let w = survival_at(&tc, &sc, d.age_c) * r;
             let t = w * d.rw;
             let t_recent = if recent_cut.is_some_and(|rc| d.kill_ts >= rc) {
                 t
@@ -673,25 +896,27 @@ pub fn thrash_tree(
                 0.0,
                 0.0,
                 0.0,
-                ch as f64,
+                ch,
             );
         }
     }
     root
 }
 
-/// One repo's hotspot inputs: (label, change-frequency by path, complexity by path).
-pub type RepoFiles = (String, HashMap<String, i64>, HashMap<String, i64>);
+/// One repo's hotspot inputs: (label, change-frequency `(count, recency_sum)` by path,
+/// complexity by path).
+pub type RepoFiles = (String, HashMap<String, (i64, f64)>, HashMap<String, i64>);
 
-/// One repo's thrash denominator: (label, churn by path).
-pub type RepoChurn = (String, HashMap<String, i64>);
+/// One repo's thrash denominator: (label, recency-weighted churn by path).
+pub type RepoChurn = (String, HashMap<String, f64>);
 
 pub struct Hotspot {
     pub repo: String, // owning repo label (shown only when aggregating several)
     pub file: String,
-    pub freq: i64, // commits touching the file in the window
-    pub complexity: i64,
-    pub score: f64,
+    pub freq: i64,       // raw commits touching the file (shown for intuition)
+    pub complexity: i64, // nesting-depth proxy
+    pub recency: f64,    // mean recency of those commits (0 = ancient, 1 = today)
+    pub score: f64,      // freq × complexity × recency — recently-hot AND deep ranks top
 }
 
 /// The "vital few" share: how much of a total a self-scaling cut should keep. The
@@ -718,22 +943,27 @@ pub fn pareto_count(desc: &[f64], share: f64) -> usize {
     desc.len()
 }
 
-/// Files ranked by change-frequency × complexity — files edited often AND deeply
-/// nested are the highest-ROI refactor targets. Ranked across all repos (each row
-/// keeps its repo so same-named files stay distinct), fully sorted; the view
-/// applies the [`pareto_count`] cut so there's no arbitrary top-N truncation here.
+/// Files ranked by change-frequency × complexity × recency — edited often AND deeply
+/// nested AND recently is the highest-ROI refactor target (the recency factor, on the
+/// same lens as the rest of the tool, demotes files that were hot long ago). Ranked
+/// across all repos (each row keeps its repo so same-named files stay distinct), fully
+/// sorted; the view applies the [`pareto_count`] cut so there's no arbitrary top-N here.
 pub fn hotspots(per_repo: &[RepoFiles]) -> Vec<Hotspot> {
     let mut rows: Vec<Hotspot> = Vec::new();
     for (label, freq, complexity) in per_repo {
         for (file, &cx) in complexity {
-            let Some(&f) = freq.get(file) else { continue };
-            if f > 0 && cx > 0 {
+            let Some(&(count, wsum)) = freq.get(file) else {
+                continue;
+            };
+            if count > 0 && cx > 0 {
+                let recency = wsum / count as f64; // mean recency of this file's edits
                 rows.push(Hotspot {
                     repo: label.clone(),
                     file: file.clone(),
-                    freq: f,
+                    freq: count,
                     complexity: cx,
-                    score: f as f64 * cx as f64,
+                    recency,
+                    score: wsum * cx as f64, // = count × cx × recency
                 });
             }
         }
@@ -744,4 +974,24 @@ pub fn hotspots(per_repo: &[RepoFiles]) -> Vec<Hotspot> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recency_is_one_at_anchor_and_halves_at_halflife() {
+        let anchor = 1_000_000_000;
+        assert!((recency(anchor, anchor) - 1.0).abs() < 1e-9);
+        let hl = (RECENCY_HALFLIFE_DAYS * DAY as f64) as i64;
+        assert!((recency(anchor - hl, anchor) - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn recency_decreases_with_age_and_clamps_future() {
+        let a = 1_000_000_000;
+        assert!(recency(a - 100_000, a) < recency(a - 1_000, a));
+        assert!((recency(a + 5_000, a) - 1.0).abs() < 1e-9); // future ts clamps to anchor
+    }
 }

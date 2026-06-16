@@ -576,75 +576,80 @@ fn author_args(authors: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// `git log <mode> --format=` over the path-stat history, with the shared windowing
-/// applied: `anchor` (`"HEAD"` or a sha) caps history at the `--at` point, `since`
-/// (unix ts) trails it to recent commits (None = all history), and `authors` (if
-/// non-empty) restricts to those commit authors (`--me`). `mode` is `--numstat`
-/// (churn) or `--name-only` (change frequency).
-fn log_paths(
-    repo: &str,
-    anchor: &str,
-    since: Option<i64>,
-    authors: &[String],
-    mode: &str,
-) -> Result<String, String> {
-    let mut args: Vec<String> = vec![
-        "log".into(),
-        "--no-merges".into(),
-        mode.into(),
-        "--format=".into(),
-    ];
-    if let Some(ts) = since {
-        args.push(format!("--since=@{ts}"));
-    }
-    args.extend(author_args(authors));
-    args.push(anchor.to_string());
-    let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
-    git(repo, &argrefs)
-}
-
-/// Churn (added+deleted) per path, over the windowed history (see [`log_paths`]).
+/// Recency-weighted churn (added+deleted) per path over *all* history (the window is
+/// the weighting, not a cutoff). `weight(commit_ts) -> f64` is applied to every commit's
+/// churn — the recency lens, supplied by the caller so this layer stays unaware of it
+/// (pass `|_| 1.0` for flat lifetime totals). Reads `%ct` interleaved with `--numstat`.
 pub fn file_churn_totals(
     repo: &str,
     anchor: &str,
-    since: Option<i64>,
     authors: &[String],
-) -> Result<HashMap<String, i64>, String> {
-    let out = log_paths(repo, anchor, since, authors, "--numstat")?;
-    let mut m: HashMap<String, i64> = HashMap::new();
+    weight: impl Fn(i64) -> f64,
+) -> Result<HashMap<String, f64>, String> {
+    let mut args: Vec<String> = vec![
+        "log".into(),
+        "--no-merges".into(),
+        "--numstat".into(),
+        "--format=%ct".into(),
+    ];
+    args.extend(author_args(authors));
+    args.push(anchor.to_string());
+    let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = git(repo, &argrefs)?;
+    let mut m: HashMap<String, f64> = HashMap::new();
+    let mut w = 1.0_f64; // current commit's recency weight, set when its %ct line is seen
     for line in out.lines() {
-        if line.trim().is_empty() {
-            continue;
+        if let Some((a, rest)) = line.split_once('\t') {
+            // numstat row: add \t del \t path
+            let (d, path) = rest.split_once('\t').unwrap_or(("-", ""));
+            if path.is_empty() {
+                continue;
+            }
+            let add: i64 = if a == "-" { 0 } else { a.parse().unwrap_or(0) };
+            let del: i64 = if d == "-" { 0 } else { d.parse().unwrap_or(0) };
+            *m.entry(path.to_string()).or_insert(0.0) += w * (add + del) as f64;
+        } else if let Ok(ct) = line.trim().parse::<i64>() {
+            w = weight(ct); // a %ct header line — switch to this commit's weight
         }
-        let mut c = line.split('\t');
-        let a = c.next().unwrap_or("-");
-        let d = c.next().unwrap_or("-");
-        let path = c.next().unwrap_or("");
-        if path.is_empty() {
-            continue;
-        }
-        let add: i64 = if a == "-" { 0 } else { a.parse().unwrap_or(0) };
-        let del: i64 = if d == "-" { 0 } else { d.parse().unwrap_or(0) };
-        *m.entry(path.to_string()).or_insert(0) += add + del;
     }
     Ok(m)
 }
 
-/// Change frequency: how many (windowed) commits touched each path (see
-/// [`log_paths`]). The standard hotspot "change" axis — "edited often" — far less
-/// size-skewed than line churn.
+/// Change frequency per path over *all* history: the raw count of commits that touched
+/// each file, plus the sum of their recency weights (`weight(commit_ts)`). The hotspot
+/// "change" axis — "edited often" — far less size-skewed than line churn; the recency sum
+/// lets the ranking favor files hot *lately* while the raw count stays shown. `%ct` is
+/// marked with a leading `@` so it's never mistaken for a filename (`--name-only` has no
+/// tabs to key on). Returns `path -> (count, recency_sum)`.
 pub fn file_change_freq(
     repo: &str,
     anchor: &str,
-    since: Option<i64>,
     authors: &[String],
-) -> Result<HashMap<String, i64>, String> {
-    let out = log_paths(repo, anchor, since, authors, "--name-only")?;
-    let mut m: HashMap<String, i64> = HashMap::new();
+    weight: impl Fn(i64) -> f64,
+) -> Result<HashMap<String, (i64, f64)>, String> {
+    let mut args: Vec<String> = vec![
+        "log".into(),
+        "--no-merges".into(),
+        "--name-only".into(),
+        "--format=@%ct".into(),
+    ];
+    args.extend(author_args(authors));
+    args.push(anchor.to_string());
+    let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = git(repo, &argrefs)?;
+    let mut m: HashMap<String, (i64, f64)> = HashMap::new();
+    let mut w = 1.0_f64;
     for line in out.lines() {
-        let p = line.trim();
-        if !p.is_empty() {
-            *m.entry(p.to_string()).or_insert(0) += 1;
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if let Some(ct) = t.strip_prefix('@').and_then(|r| r.parse::<i64>().ok()) {
+            w = weight(ct); // an @%ct header line
+        } else {
+            let e = m.entry(t.to_string()).or_insert((0, 0.0));
+            e.0 += 1;
+            e.1 += w;
         }
     }
     Ok(m)

@@ -61,7 +61,7 @@ rationale and the design non-negotiables live in `README.md`. This file is how t
   pointing down. Survival is fit **per repo** — repo frailty dominates line
   survival, so a pooled curve misweights every repo.
 - **Communicate the anchor.** Every time-framed surface must read correctly under
-  `--at` — none may imply "now" when it isn't (`render::window_label`,
+  `--at` — none may imply "now" when it isn't (`render::lens_window`,
   `Cockpit.as_of`).
 
 ## The gate

@@ -18,27 +18,33 @@ hold — not the burst you imagine.
 
 ```
 v∞
-terminal velocity · main · last 7d vs trailing 8wk
+terminal velocity · main · lately · recent weeks weighted most
 ────────────────────────────────────────────────────────────
 
-  ✓  flow      ▁▂▁▁▁█▃   ramping · ~19059 lines/wk
-  ▲  batch     ▃▃▄▅▆▆▇   rising · median 190→240 (p78 for you)
+  ·  flow      ▁▁▁▁█▂▂▂ steady · this week ~33k/wk · typical ~43k
+  ▲  batch     ▃▁▃▅▅▃▄█ rising · this week ~658/commit · typical ~300
         └ split smaller — cheapest flow win
-  ✓  thrash    ▇▅█▃▃▁▆   low · 6.1% of churn
+  ✓  thrash    ▅█▃▃▁▃▆▁ low · ~4.9% of recent churn
         └ low — your speed is real throughput, not thrashing
-  ✓  excision  ▂█▂▂▁▆▃   healthy · 9.6% of churn
-        └ deliberate scope-cutting (healthy)
-  ·  cadence   ▁▂▂▃▂▂▃   steady · nights 14% · weekends 9% (local, UTC-4)
+  ·  excision  █▂▂▂▁▇▃▁ low · ~6.8% of recent churn
+        └ low — little recent work pulled back out
+  ▲  cadence   ▄▃▃▃██▂▁ heavy · nights ~13% · weekends ~39% (local, UTC-4)
+        └ 39% weekends lately — protect recovery time
 
 ────────────────────────────────────────────────────────────
 
-code survival  █▇▇▆▆▅▄▄▄▄▃▃▃▁▁▁  half-life ~491c / ~86d · 76% alive
+code survival  █▇▇▆▆▅▅▅▄▄▄▄▃▃▁▁  half-life ~504c / ~103d · 82% alive
   how long code survives here, fit to this repo · `--explain` to unpack it
 
 ────────────────────────────────────────────────────────────
 
-net +334k (… added, … deleted) · run `tv thrash` / `tv hotspots` to drill in
+net +372k (489k added, 116k deleted) · run `tv thrash` / `tv hotspots` to drill in
 ```
+
+Every figure is read against your own **recent** history — a recency-weighted
+baseline (a commit's pull halves every ~3 weeks), so the board tracks how the repo
+behaves *now*, not its lifetime average. `· lately` in the header is that lens;
+`--all` swaps it for flat lifetime totals on `tv thrash` / `tv hotspots`.
 
 The left-gutter glyph is the at-a-glance status: `·` calm · `✓` good · `▲` watch
 · `■` alarm (symbol-distinct, so it reads under `NO_COLOR` too). Read the column,
@@ -58,10 +64,11 @@ quiet, stated plainly, is reassurance you can trust.
    would be lossy and would editorialize *what matters* for you. (Stops it being
    both metric-theater and a thumb on the scale.)
 2. **Trends, not snapshots.** Every number is a sparkline against a trailing
-   baseline. A *rising* batch median is the signal; the absolute 240 isn't.
-3. **Your own distribution is the axis.** "p78 for you," never "elite vs low."
-   No external benchmarks. (Line survival is dominated by repo identity, so a
-   universal yardstick is statistically wrong anyway.)
+   baseline. A *rising* batch median is the signal; the absolute number isn't.
+3. **Your own recent baseline is the axis.** Each metric is judged against *your*
+   recent history — a recency-weighted baseline (a commit's weight halves every
+   ~3 weeks), never "elite vs low" external benchmarks. (Line survival is dominated
+   by repo identity, so a universal yardstick is statistically wrong anyway.)
 4. **Aggregate by subsystem, never by person.** The load-bearing safety rule.
    Per-developer columns turn this into the surveillance tool the whole field's
    anti-metrics consensus forbids. `thrash`/`hotspots` group by directory /
@@ -74,7 +81,7 @@ quiet, stated plainly, is reassurance you can trust.
 6. **Git-status-fast.** Daily glance < ~2s via an incremental, HEAD-keyed cache:
    only new commits get the expensive blame pass.
 7. **Coverage honesty.** Too little history? Flag the board `provisional` — don't
-   render a confident-but-fake percentile.
+   render a confident-but-fake baseline.
 8. **Status, not a verdict.** Every metric is shown with equal billing and tagged
    with a status glyph; you triage. No condensed summary line — it would be lossy
    and would editorialize what matters. Each status is rule-composed from its own
@@ -85,15 +92,15 @@ quiet, stated plainly, is reassurance you can trust.
 
 | metric | what | status |
 |--------|------|--------|
-| **batch** | lines/commit, weekly-median trend; small batches flow faster | ✅ live |
+| **batch** | lines/commit, this week vs your recent-typical; small batches flow faster | ✅ live |
 | **cadence** | night/weekend share; drift = burnout tripwire | ✅ live · `tv cadence` punchcard |
 | **net flow** | added − deleted; building vs consolidating | ✅ live |
 | **intent mix** | feature/refactor/fix/… (heuristic) | ✅ live |
-| **flow** | survival-weighted build-flow rate | ✅ live |
+| **flow** | weekly build rate, this week vs your recent-typical | ✅ live |
 | **thrash** | in-place rewrite, S-weighted (the risk signal) | ✅ live · `tv thrash` by area · qualified by commit intent |
 | **excision** | wholesale removal (healthy scope-cutting) | ✅ live |
 | **survival** | the S(age) curve + half-life + % still alive (Kaplan-Meier) | ✅ live · the foundation, shown below the indicators |
-| **hotspots** | churn × complexity, by file | ✅ live · `tv hotspots` |
+| **hotspots** | revisions × complexity × recency, by file | ✅ live · `tv hotspots` |
 
 `tv status` and `tv report` lead with the **survival curve** — S(age), a deleted
 line's odds of having lived this long — because thrash and excision weight every
@@ -101,8 +108,10 @@ death by it. It's fit per repo (so each repo is judged by its own line lifetimes
 and shown as the curve shape, the half-life, and the still-alive fraction.
 
 `tv thrash` ranks in-place rewrite by directory; `tv hotspots` ranks files by
-churn × complexity; `tv cadence` draws a weekday × hour commit punchcard (when
-work lands, in local time) — all aggregate by area/time, never by author.
+revisions × complexity × recency; `tv cadence` draws a weekday × hour commit
+punchcard (when work lands, in local time), with ▴/▾ marks on the weekdays and
+hours that are heating or cooling lately — all aggregate by area/time, never by
+author.
 
 `--me` (any command) scopes everything to your own commits, inferred from
 `git config`. Two lenses: your *rework* (thrash/excision on commits where you
@@ -111,16 +120,15 @@ long the lines you write last — introducer = you). It's self-only by design.
 
 ## How it decides
 
-Run **`tv explain`** to print the full heuristic decision tree right in the
-terminal — the intent classifier, every state threshold, the status glyphs, and
-which signals are self-calibrated vs. tunable constants. The fastest way to build
-an accurate mental model of what `tv` is (and isn't) inferring.
-
-Or run **`tv status --explain`** to fold that tree into the live board: each
-metric expands *in place* into its own branches, the one that fired for your repo
-in bold and the rest dimmed, so the explanation sits right under the number it
-explains. The survival line then opens into the Kaplan-Meier formula and the full
-story of how a line lives and dies. Same tree, lit against your own history.
+Run **`tv status --explain`** to fold the full heuristic decision tree into the
+live board: each metric expands *in place* into its own branches — the intent
+classifier, every state threshold, the status glyphs, and which signals are
+self-calibrated vs. tunable constants — with the one that fired for your repo in
+bold and the rest dimmed, so the explanation sits right under the number it
+explains. The recency lens (how recent commits are weighted) is spelled out up
+top; the survival line opens into the Kaplan-Meier formula and the full story of
+how a line lives and dies. The fastest way to build an accurate mental model of
+what `tv` is — and isn't — inferring.
 
 ## Install
 
@@ -171,7 +179,7 @@ With `tv` on your `PATH` (Cargo/prebuilt install) — otherwise use `./target/re
 ```sh
 tv                         # cockpit for the current repo
 tv --repo /path/to/repo
-tv thrash                  # or: hotspots, cadence, explain
+tv thrash                  # or: hotspots, cadence
 tv status --me             # only my commits: my rework + how long my code lasts
 tv status --at 2026-03-01  # rewind: build flow as of a past date/commit
 tv report                  # all three -> one HTML page (tv-report.html)
@@ -227,7 +235,7 @@ src/
   model.rs      domain + presentation types (Commit, Card, Cockpit, Intent)
   intent.rs     heuristic intent classifier (keyword + diff-shape; the API seam)
   survival.rs   Kaplan-Meier survival + half-life (the self-calibrating yardstick)
-  spark.rs      sparklines, percentile-against-own-history, median
+  spark.rs      sparklines, medians (plain + recency-weighted), Wilson interval
   metrics.rs    build the cockpit + thrash tree + hotspots (all live)
   style.rs      zero-dep ANSI palette (NO_COLOR / --no-color aware)
   render.rs     terminal cockpit (default) + HTML report (--report)

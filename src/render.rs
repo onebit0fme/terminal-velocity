@@ -5,7 +5,9 @@
 
 use std::fs;
 
-use crate::metrics::{pareto_count, Hotspot, TreeNode, VITAL_FEW};
+use crate::metrics::{
+    pareto_count, Hotspot, TreeNode, THRASH_ELEVATED_PCT, THRASH_HIGH_PCT, VITAL_FEW,
+};
 use crate::model::{Card, Cockpit, Heatmap, RepoSurvival, Tone};
 use crate::spark::sparkline;
 use crate::style::Palette;
@@ -57,6 +59,11 @@ pub fn print_cockpit(c: &Cockpit, p: &Palette, explain: bool) {
         p.bold("terminal velocity"),
         p.dim(&format!("· {} · {}", c.branch, c.window)),
     );
+    // `--explain` expands the header's "lately" right here — the recency lens frames
+    // every card below, so it leads rather than hiding in the survival section.
+    if explain {
+        print_recency(p);
+    }
     println!("{dim_rule}");
     println!();
 
@@ -93,8 +100,13 @@ pub fn print_cockpit(c: &Cockpit, p: &Palette, explain: bool) {
         println!("{}", p.dim(&line));
     }
 
-    // The deliberate non-goals — what tv refuses to infer from git alone.
+    // The deliberate non-goals — what tv refuses to infer from git alone — plus the
+    // glyph/marker legend the trees above rely on (the retired `tv explain`'s one job).
     if explain {
+        println!(
+            "{}",
+            p.dim("glyphs · · calm  ✓ good  ▲ watch  ■ alarm   ·   ● self-calibrated  ○ tunable")
+        );
         println!(
             "{}",
             p.dim("not inferred: deploys / incidents / lead-time · people · cross-repo ranks")
@@ -103,9 +115,9 @@ pub fn print_cockpit(c: &Cockpit, p: &Palette, explain: bool) {
 }
 
 /// `--explain`: expand a card in place into its decision tree, the branch that
-/// fired (this repo's current state) lit and its siblings dimmed. Reuses the same
-/// `TREE_BODY` that `tv explain` prints, sliced to this metric's section, so the
-/// two surfaces never drift.
+/// fired (this repo's current state) lit and its siblings dimmed. Slices this metric's
+/// section out of `TREE_BODY`; the report's `report_card_explain` reads the same source,
+/// so the terminal and HTML surfaces never drift.
 fn print_card_explain(card: &Card, p: &Palette) {
     let Some(block) = tree_block(&card.key.to_uppercase()) else {
         return;
@@ -271,12 +283,32 @@ fn print_survival_formula(p: &Palette) {
     ] {
         println!("{}", p.dim(line));
     }
+    // The story is the narrative beat — signposted so the shift from the terse math
+    // above is intentional, not a wall. (Recency lives up top now, by the header.)
+    println!();
+    println!("{}", p.dim("  the model, in plain words:"));
     for para in SURVIVAL_STORY {
         println!();
         for line in wrap(para, p.width - 2) {
             println!("{}", p.dim(&format!("  {line}")));
         }
     }
+}
+
+/// `--explain` only: unpack the header's "lately" — the recency lens every figure on
+/// the board shares — right where it's introduced, before the cards that use it.
+fn print_recency(p: &Palette) {
+    println!(
+        "{}",
+        p.dim(&format!(
+            "a commit's pull by age, vs one made today (½ every ~{:.0}d):",
+            crate::metrics::RECENCY_HALFLIFE_DAYS
+        ))
+    );
+    println!(
+        "{}",
+        p.dim(&format!("  {}", crate::metrics::recency_anchors()))
+    );
 }
 
 /// Sparkline runs oldest→newest. The final bar is *this week* — the value the
@@ -323,44 +355,49 @@ fn trunc(s: &str, n: usize) -> String {
 }
 
 fn thr_tone(pct: f64) -> Tone {
-    if pct < 8.0 {
+    if pct < THRASH_ELEVATED_PCT {
         Tone::Good
-    } else if pct < 15.0 {
+    } else if pct < THRASH_HIGH_PCT {
         Tone::Watch
     } else {
         Tone::Alarm
     }
 }
 
-/// The window descriptor for the drill-downs. When anchored (`as_of` set) it drops
-/// the now-implying "last" — the date is already shown, and "{wk} to <date>" /
-/// "all-time thru <date>" makes the trailing frame explicit on a header-less view.
-/// `wk` is the trailing-window unit: "8wk" in the terminal, "8 weeks" in the report.
-fn window_label(recent: bool, as_of: Option<&str>, wk: &str) -> String {
+/// The drill-downs' basis label — the recency lens (so thrash & hotspots reconcile with
+/// `tv status`), or flat lifetime totals under `--all` (`recent=false`). When anchored
+/// (`as_of` set) it drops the now-implying "lately" and names the date instead. Both
+/// surfaces (terminal + report) read this one label.
+fn lens_window(recent: bool, as_of: Option<&str>) -> String {
     match (recent, as_of) {
-        (true, None) => format!("last {wk}"),
-        (true, Some(d)) => format!("{wk} to {d}"),
-        (false, None) => "all-time".to_string(),
-        (false, Some(d)) => format!("all-time thru {d}"),
+        (true, None) => "lately · recency-weighted".to_string(),
+        (true, Some(d)) => format!("recency-weighted, to {d}"),
+        (false, None) => "all-time · unweighted".to_string(),
+        (false, Some(d)) => format!("all-time, to {d}"),
     }
 }
 
 pub fn print_thrash(branch: &str, root: &TreeNode, recent: bool, as_of: Option<&str>, p: &Palette) {
-    let window = window_label(recent, as_of, "8wk");
+    // Same recency lens as `tv status` (so the root reconciles with the thrash card);
+    // `--all` (recent=false) switches to flat lifetime totals.
+    let window = lens_window(recent, as_of);
+    // Root total = the cockpit thrash card's number (same lens) — shown so the per-folder
+    // intensities below (each a share of *its own* churn) don't read as non-reconciling.
+    let overall = root.thrash_pct();
     println!("{}", p.dim("v∞"));
     println!(
         "{} {}",
         p.bold("tv thrash"),
-        p.dim(&format!("· {branch} · {window}"))
+        p.dim(&format!("· {branch} · {window} · ~{overall:.1}% of churn"))
     );
     println!("{}", p.dim(&p.rule()));
     println!(
         "{}",
-        p.dim("in-place rewrite: recently-written code rewritten again, weighted")
+        p.dim("in-place rewrite: recently-written code rewritten again, by folder.")
     );
     println!(
         "{}",
-        p.dim("by how recent. by folder. % = thrash as a share of that folder's churn.")
+        p.dim("% = thrash as a share of that folder's churn — same lens as `tv status`.")
     );
     println!(
         "{}",
@@ -369,9 +406,9 @@ pub fn print_thrash(branch: &str, root: &TreeNode, recent: bool, as_of: Option<&
     if recent {
         // "last" only when the window ends now; anchored, it's the 7d before the anchor.
         let traj = if as_of.is_some() {
-            "↑ heating / ↓ cooling = 7d vs the 8-week pace."
+            "↑ heating / ↓ cooling = 7d vs your recent pace."
         } else {
-            "↑ heating / ↓ cooling = last 7d vs the 8-week pace."
+            "↑ heating / ↓ cooling = last 7d vs your recent pace."
         };
         println!("{}", p.dim(traj));
     }
@@ -399,9 +436,10 @@ pub fn print_thrash(branch: &str, root: &TreeNode, recent: bool, as_of: Option<&
     );
 }
 
-/// A folder's recent rework trajectory: last-7d thrash as a fraction of its 8-week
-/// thrash, bucketed against its proportional ~1/8 share. The cut lives here once so
-/// the terminal arrow and the HTML glyph can never disagree.
+/// A folder's recent rework trajectory: last-7d thrash as a fraction of its (recency-
+/// weighted) total thrash, bucketed by empirical cut-points — how much of the recent-
+/// leaning rework landed in the last 7 days. The cut lives here once so the terminal
+/// arrow and the HTML glyph can never disagree.
 enum Trend {
     Heating, // ↑ more recent rework than its steady share
     Cooling, // ↓ cooled off
@@ -490,11 +528,7 @@ fn print_branch(p: &Palette, node: &TreeNode, scale: f64, floor: f64, prefix: &s
     for (i, (name, child)) in kids.iter().enumerate() {
         let last = i == n - 1;
         let connector = if last { "└─ " } else { "├─ " };
-        let pct = if child.churn > 0.0 {
-            child.thrash / child.churn * 100.0
-        } else {
-            0.0
-        };
+        let pct = child.thrash_pct();
         let label = trunc(&format!("{prefix}{connector}{name}"), 30);
         println!(
             "  {label} {} {}  {}  {}",
@@ -516,17 +550,19 @@ pub fn print_hotspots(
     as_of: Option<&str>,
     p: &Palette,
 ) {
-    let window = window_label(recent, as_of, "8wk");
+    let window = lens_window(recent, as_of);
     println!("{}", p.dim("v∞"));
     println!(
         "{} {}",
         p.bold("tv hotspots"),
-        p.dim(&format!("· {scope} · {window} · revisions × complexity"))
+        p.dim(&format!(
+            "· {scope} · {window} · revisions × complexity × recency"
+        ))
     );
     println!("{}", p.dim(&p.rule()));
     println!(
         "{}",
-        p.dim("files changed often AND deeply nested — refactoring these pays off most.")
+        p.dim("files changed often AND deeply nested AND recently — top refactor ROI.")
     );
     if rows.is_empty() {
         println!();
@@ -539,7 +575,7 @@ pub fn print_hotspots(
     println!(
         "{}",
         p.dim(&format!(
-            "the 80% that carries the heat: {cut} of {} · Nx = commits touched · cx = nesting.",
+            "the 80% that carries the heat: {cut} of {} · Nx = commits · cx = nesting · rcy = how recent (1=today).",
             rows.len()
         ))
     );
@@ -549,9 +585,12 @@ pub fn print_hotspots(
         // sqrt scaling so the list past the top file stays readable; the numbers
         // carry the real magnitude.
         let stats = if multi {
-            format!("{}× changed · cx {} · {}", r.freq, r.complexity, r.repo)
+            format!(
+                "{}× · cx {} · rcy {:.2} · {}",
+                r.freq, r.complexity, r.recency, r.repo
+            )
         } else {
-            format!("{}× changed · cx {}", r.freq, r.complexity)
+            format!("{}× · cx {} · rcy {:.2}", r.freq, r.complexity, r.recency)
         };
         println!(
             "  {}  {} {}",
@@ -568,7 +607,7 @@ pub fn print_hotspots(
     }
 }
 
-/// One punchcard cell: shaded block scaled to the busiest cell (GitHub-green).
+/// One rhythm-grid cell: shaded block scaled to the busiest cell (GitHub-green).
 fn heat_cell(p: &Palette, count: u32, max: u32) -> String {
     if count == 0 {
         return "  ".to_string();
@@ -586,14 +625,47 @@ fn heat_cell(p: &Palette, count: u32, max: u32) -> String {
     }
 }
 
-/// The cadence drill-down: a weekday × hour commit punchcard (local time).
-pub fn print_heatmap(h: &Heatmap, scope: &str, p: &Palette) {
+/// The single source of the shift heating/cooling thresholds: a margin's z-score → its
+/// glyph, or `None` when steady. ▲ strong / ▴ mild heating, ▾ / ▼ cooling. Sample-size
+/// aware (z = standardized residual vs the margin's own usual rate). Both surfaces (the
+/// terminal gutter + the report axes), the report's CSS class, and the `any_*` gates all
+/// derive from this, so the buckets can't drift. Monochrome — direction is the message,
+/// not good/bad (the cockpit card owns the verdict).
+/// Shift z-score cut-points (standardized residuals): a margin past STRONG marks strong
+/// heating/cooling, past MILD a mild one. Named rather than inline per the "no arbitrary
+/// numeric defaults" rule — siblings of metrics' `THRASH_*` / cadence-heavy cuts.
+const SHIFT_STRONG_SIGMA: f64 = 3.0;
+const SHIFT_MILD_SIGMA: f64 = 1.5;
+
+fn shift_glyph(z: f64) -> Option<&'static str> {
+    if z > SHIFT_STRONG_SIGMA {
+        Some("▲")
+    } else if z > SHIFT_MILD_SIGMA {
+        Some("▴")
+    } else if z < -SHIFT_STRONG_SIGMA {
+        Some("▼")
+    } else if z < -SHIFT_MILD_SIGMA {
+        Some("▾")
+    } else {
+        None
+    }
+}
+
+/// The cadence drill-down: a weekday × hour commit punchcard (local time). The grid is
+/// the all-time *rhythm* (where you commit); the *shift* — how that rhythm is vectoring
+/// lately — rides the grid's own axes, a ▴/▾ next to a weekday or above an hour marking
+/// the days and hours that are heating or cooling. Rhythm is the static, shift the dynamic.
+pub fn print_heatmap(h: &Heatmap, scope: &str, as_of: Option<&str>, p: &Palette) {
+    let basis = match as_of {
+        Some(d) => format!("all history thru {d}"),
+        None => "all history".to_string(),
+    };
     println!("{}", p.dim("v∞"));
     println!(
         "{} {}",
         p.bold("tv cadence"),
         p.dim(&format!(
-            "· {scope} · when commits land · {} · all history",
+            "· {scope} · when commits land · {} · {basis}",
             h.tz
         ))
     );
@@ -607,26 +679,28 @@ pub fn print_heatmap(h: &Heatmap, scope: &str, p: &Palette) {
     for hh in (0..24).step_by(3) {
         axis.push_str(&format!("{hh:<6}"));
     }
+
+    // Hour-shift markers ride *above* the hour ticks, aligned over their columns
+    // (2 cols/hour, matching the cells): a ▴/▾ over the hours heating/cooling lately.
+    // Only drawn when one fires.
+    let any_hour = h.hour_shift.iter().any(|&z| shift_glyph(z).is_some());
+    let any_day = h.day_shift.iter().any(|&z| shift_glyph(z).is_some());
+    if any_hour {
+        let marks: String = (0..24)
+            .map(|hh| format!("{} ", shift_glyph(h.hour_shift[hh]).unwrap_or(" ")))
+            .collect();
+        println!("     {marks}");
+    }
     println!("{}", p.dim(&axis));
 
+    // Rhythm grid: the all-time pattern. Each row is tagged in the gutter with its
+    // weekday-shift marker (▴Mon = Mondays heating lately, ▾ cooling) — so the row and
+    // column markers frame the same grid that shows the steady rhythm.
     for (d, row) in h.counts.iter().enumerate() {
         let cells: String = (0..24).map(|hh| heat_cell(p, row[hh], h.max)).collect();
-        let day = p.bold(&format!("{:<3}", DAYS[d]));
-        println!(" {day} {cells}");
+        let mark = shift_glyph(h.day_shift[d]).unwrap_or(" ");
+        println!("{mark}{} {cells}", p.bold(&format!("{:<3}", DAYS[d])));
     }
-
-    println!("{}", p.dim(&p.rule()));
-    println!(
-        "  {}  ·  {}",
-        p.bold(&format!(
-            "peak {} {:02}:00 ({} commits)",
-            DAYS[h.peak_day], h.peak_hour, h.max
-        )),
-        p.dim(&format!(
-            "{:.0}% weekend · {:.0}% night",
-            h.weekend_pct, h.night_pct
-        )),
-    );
     println!(
         "{}",
         p.dim(&format!(
@@ -637,81 +711,75 @@ pub fn print_heatmap(h: &Heatmap, scope: &str, p: &Palette) {
             p.bold(&p.green("██")),
         ))
     );
+    // The shift legend, only when a marker actually fired; otherwise say so plainly, so
+    // the dynamic is always reported (not just the static rhythm).
+    if any_hour || any_day {
+        println!(
+            "{}",
+            p.dim("  ▴ heating · ▾ cooling — a weekday (row) or hour (column) busier/quieter than its usual share, lately")
+        );
+    } else {
+        println!(
+            "{}",
+            p.dim(
+                "  lately: rhythm holding steady — no weekday or hour notably heating or cooling"
+            )
+        );
+    }
+
+    println!("{}", p.dim(&p.rule()));
+    // Footer: the peak slot + the aggregate vector (reconciles with the status card).
+    println!(
+        "  {}  ·  {}",
+        p.bold(&format!(
+            "peak {} {:02}:00 ({} commits)",
+            DAYS[h.peak_day], h.peak_hour, h.counts[h.peak_day][h.peak_hour]
+        )),
+        p.dim(&format!(
+            "weekends {:.0}%→{:.0}% · nights {:.0}%→{:.0}% (all-time → lately)",
+            h.weekend_all * 100.0,
+            h.weekend_lately * 100.0,
+            h.night_all * 100.0,
+            h.night_lately * 100.0,
+        ))
+    );
 }
 
-const EXPLAIN_HEADER: &str = "\
-how every word in the cockpit is decided.
-  ● self-calibrated to your repo (no magic number)
-  ○ tunable constant (the only hand-set knobs)
-  ▸ sparklines: 8 weeks old→new; bold last bar = the latest week
-";
-
+/// Per-metric decision-tree sections, sliced by [`tree_block`] and shown (with the live
+/// branch lit) under `tv status --explain`. `●` = self-calibrated, `○` = a tunable
+/// constant; the glyph/marker legend rides the `--explain` footer (see [`print_cockpit`]).
+/// Mirror of the logic in intent.rs / metrics.rs — keep in sync with thresholds.
 const TREE_BODY: &str = "\
-INTENT · per commit, first match wins  (qualifies thrash)
-├─ subject has \"revert\" ···················· revert
-├─ subject has fix/bug/resolve/correct ······ fix
-├─ ○ deleted > 2×added AND >15 lines ········ refactor
-│    └ …or retire/drop/delete/rename/sweep
-├─ ○ ≥60% files .md or docs/ ················ docs
-├─ ○ ≥60% files under tests/ ················ test
-├─ subject has ci/mise/docker/lint/deploy ··· ops
-├─ ○ ≥60% files .css/.js/.html/static/ ······ web
-├─ subject has add/new/wire/expose/ship ····· feature
-└─ otherwise ································ other
+FLOW · ● this week's churn vs your recent-typical weekly churn
+│    typical = recency-weighted median of prior weeks (recent weeks count most)
+├─ ○ this week > 1.25× typical ··· ramping
+├─ ○ this week < 0.70× typical ··· slowing → \"blocked, or shipping less?\"
+└─ else ························· steady
 
-FLOW · ● weekly throughput vs your own median
-├─ ○ recent > 1.25× ··· ramping
-├─ ○ recent < 0.70× ··· slowing → \"blocked, or shipping less?\"
-└─ else ··············· steady
+BATCH · ● this week's lines/commit vs your recent-typical  (smaller = faster)
+├─ ○ this week > 1.25× typical ··· rising → \"split smaller — cheapest flow win\"
+├─ ○ this week < 0.80× typical ··· easing
+└─ else ························· steady
 
-BATCH · ● lines/commit in the latest week vs your median  (smaller = faster)
-├─ ○ recent > 1.25× ··· rising  → \"split smaller — cheapest flow win\"
-├─ ○ recent < 0.80× ··· easing
-└─ else ··············· steady   (headline shows p__ = your percentile)
-
-THRASH · ● in-place rewrite, aged by survival   (% of churn)
-│    weight w = S(age)   ·   thrash = Σ w × rw
+THRASH · ● in-place rewrite, aged by survival × recency   (% of recent churn)
+│    weight w = S(age) × recency(kill, ½-life 21d)   ·   thrash = Σ w × rw
 │    rw = min(added,deleted) ÷ deleted  per file  (1=rewrite, 0=removal)
+│    Wilson band [lo–hi] shown for confidence (n_eff = effective recent commits)
 ├─ ○ < 8%  ··· low      → \"real throughput, not thrashing\"
 ├─ ○ < 15% ··· elevated → \"rename/format sweep? sanity-check\"
 └─ ○ ≥ 15% ··· high     → \"stabilize this area before adding\"
 
-EXCISION · ● the Σ w × (1−rw) half   (% of churn)
-└─ always ···· healthy → \"deliberate scope-cutting\"
+EXCISION · ● code removed outright (the Σ w × (1−rw) half) — thrash's twin
+│    high = recent, normally-durable code pulled: cleanup, or false starts?
+├─ ○ < 8%  ··· low     → \"little recent work pulled back out\"
+├─ ○ < 15% ··· pruning → \"healthy scope-cutting\"
+└─ ○ ≥ 15% ··· heavy   → \"decisive cleanup or false starts? git can't tell\"
 
-CADENCE · local time via `date +%z` · night 20:00–05:59 · weekend Sat/Sun
-├─ ○ recent night% > baseline + 7 ··· nights ↑ → \"protect rest\"
-├─ ○ weekend > 35% or night > 25% ··· heavy    → \"protect recovery\"
-└─ else ····························· steady
-
-STATUS · the left-gutter glyph per metric — no composed verdict; you triage
-├─ · calm   nothing to see          ✓ good   explicit reassurance (green)
-├─ ▲ watch  drifting — look           ■ alarm  act (red)
-└─ ○ < 3 weeks history → header chip \"provisional (Nwk)\" (caveats the board)
-
-half-life · ● first age where survival S(age) ≤ 0.5
-not inferred: deploys/incidents/lead-time · people · cross-repo ranks
+CADENCE · recency-weighted (½-life 21d) · night 20:00–05:59 · weekend Sat/Sun (local)
+├─ ○ weekend > 35% ··· heavy → \"protect recovery\"
+├─ ○ night > 25% ····· heavy → \"protect recovery\"
+└─ else ············· steady  (Wilson band in --explain; thin history → provisional)
 ";
-
-/// The abstract decision tree (`tv explain`; no repo needed) — the full reference,
-/// every section, nothing lit. `status --explain` instead expands each metric in
-/// place against the live board (see [`print_card_explain`]), reusing `TREE_BODY`.
-/// Mirror of the logic in intent.rs / metrics.rs — keep in sync with thresholds.
-pub fn print_explain(p: &Palette) {
-    println!("{}", p.dim("v∞"));
-    println!("{}", p.bold("terminal velocity · decision tree"));
-    println!("{}", p.dim(&p.rule()));
-    print!(
-        "{}\n{}",
-        colorize_markers(p, EXPLAIN_HEADER),
-        colorize_markers(p, TREE_BODY),
-    );
-}
-
-/// ● self-calibrated (green) · ○ tunable (yellow) — no-ops when color is off.
-fn colorize_markers(p: &Palette, s: &str) -> String {
-    s.replace('●', &p.green("●")).replace('○', &p.yellow("○"))
-}
 
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -762,6 +830,7 @@ font-size:.74rem;line-height:1.55;color:var(--muted);margin:.75rem 0 0;white-spa
 .card.good .tree b{color:var(--good)}.card.watch .tree b{color:var(--watch)}.card.alarm .tree b{color:var(--alarm)}\
 .story{margin-top:1rem}\
 .story p{font-size:.9rem;line-height:1.65;margin:0 0 .75rem}\
+.lens{color:var(--muted);font-size:.82rem;margin:.2rem 0 0}\
 details.formula{margin-top:.6rem}\
 details.formula>summary{cursor:pointer;color:var(--muted);font-size:.8rem;font-weight:600}\
 details.formula pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;\
@@ -806,10 +875,13 @@ font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.82re
 .scurve .mid{stroke:var(--line);stroke-width:1;stroke-dasharray:3 3;vector-effect:non-scaling-stroke}\
 .smeta{flex:0 0 auto;color:var(--muted);font-size:.82rem;white-space:nowrap;font-variant-numeric:tabular-nums}\
 .hgrid{display:grid;grid-template-columns:2.4rem repeat(24,1fr);gap:2px;align-items:center}\
-.hhour{font-size:.62rem;color:var(--muted);grid-row:1;overflow:visible;white-space:nowrap}\
+.hhour{font-size:.62rem;color:var(--muted);overflow:visible;white-space:nowrap}\
+.hmark{font-size:.7rem;line-height:1;text-align:center;color:var(--muted)}\
 .hday{font-size:.72rem;color:var(--muted);padding-right:.4rem;white-space:nowrap}\
 .hgrid i.cell{height:13px;border-radius:2px;background:var(--good);display:block}\
-.hgrid i.cell.peak{outline:1.5px solid var(--ink);outline-offset:1px}";
+.hgrid i.cell.peak{outline:1.5px solid var(--ink);outline-offset:1px}\
+.hmark.heat,.hday.heat{color:#d9822b}.hmark.cool,.hday.cool{color:#4a90d9}\
+.hday.heat,.hday.cool{font-weight:600}";
 
 /// Self-contained HTML report (the `report` command / `--report`): one web page
 /// carrying the same semantics as all three terminal views — the status-board
@@ -852,22 +924,27 @@ pub fn write_report(
         ));
     }
 
-    let window = window_label(recent, as_of, "8 weeks");
+    let thr_overall = tree.thrash_pct();
+    let thr_window = format!(
+        "{} · ~{thr_overall:.1}% of churn",
+        lens_window(recent, as_of)
+    );
     let thr_sub = if recent {
         format!(
-            "In-place rewrite, weighted by recency, by folder · {window}. \
-             % = thrash as a share of that folder's churn. \
-             ↑ heating / ↓ cooling vs the 8-week pace."
+            "In-place rewrite of recently-written code, by folder · {thr_window}. \
+             % = thrash as a share of that folder's churn (same lens as the board). \
+             ↑ heating / ↓ cooling = last 7d vs your recent pace."
         )
     } else {
         format!(
-            "In-place rewrite, weighted by recency, by folder · {window}. \
-             % = thrash as a share of that folder's churn."
+            "In-place rewrite of recently-written code, by folder · {thr_window}. \
+             % = thrash as a share of that folder's churn (same lens as the board)."
         )
     };
+    let hot_window = lens_window(recent, as_of);
     let hot_sub = format!(
-        "Changed often AND deeply nested — the highest-ROI refactor targets · {window}. \
-         Nx = commits that touched the file · cx = nesting complexity."
+        "Changed often AND deeply nested AND recently — the highest-ROI refactor targets · {hot_window}. \
+         Nx = commits · cx = nesting complexity · rcy = how recent (1 = today)."
     );
     let (surv_h2, surv_sub) = if c.personal {
         (
@@ -888,10 +965,16 @@ pub fn write_report(
     };
     let cad_sub = format!(
         "When commits land, by weekday and hour ({}, {cad_window}). \
-         Darker = busier; peak {} {:02}:00.",
+         The grid is the rhythm (darker = busier); ▴/▾ beside a weekday or above an hour \
+         marks where it's heating/cooling lately (warm = heating, cool = cooling). \
+         Peak {} {:02}:00. weekends {:.0}%→{:.0}% · nights {:.0}%→{:.0}% (all-time → lately).",
         esc(&heat.tz),
         DAYS[heat.peak_day],
         heat.peak_hour,
+        heat.weekend_all * 100.0,
+        heat.weekend_lately * 100.0,
+        heat.night_all * 100.0,
+        heat.night_lately * 100.0,
     );
     // A loud, unmissable flag that the whole page is a point-in-time snapshot —
     // the report is shared, where reading a rewound view as "today" is costly.
@@ -924,8 +1007,8 @@ pub fn write_report(
 <p class=sub>{thr_sub}</p><div class=panel>{thrash}</div></section>\
 <section class=section><h2>hotspots — refactor targets</h2>\
 <p class=sub>{hot_sub}</p><div class=panel>{hot}</div></section>\
-<footer>{footer}<div class=safety>Self-relative: thresholds are percentiles \
-against this repo's own history, not external benchmarks.</div>\
+<footer>{footer}<div class=safety>Self-relative: each metric is judged against this \
+repo's own recent baseline (recency-weighted), not external benchmarks.</div>\
 <div class=builtby>built by <a href=\"https://github.com/onebit0fme\" rel=noopener>@onebit0fme</a></div>\
 </footer></main></body></html>",
         branch = esc(&c.branch),
@@ -1002,21 +1085,60 @@ fn report_survival_prose() -> String {
         "  →   feeds thrash weight w = S(age) · excision weight",
     ]
     .join("\n");
+    // Recency is the board-wide lens, not Kaplan-Meier math — so it's its own caption,
+    // not buried in the formula disclosure (mirrors the terminal: lens up top).
+    let lens = format!(
+        "<p class=lens>recency · every figure leans on recent weeks \
+         (a commit's pull halves every ~{:.0}d): {}</p>",
+        crate::metrics::RECENCY_HALFLIFE_DAYS,
+        esc(&crate::metrics::recency_anchors())
+    );
     format!(
-        "<div class=story>{story}</div>\
+        "{lens}<div class=story>{story}</div>\
          <details class=formula><summary>the math — Kaplan-Meier product-limit</summary>\
          <pre>{}</pre></details>",
         esc(&formula)
     )
 }
 
-/// The cadence punchcard as a CSS grid — opacity scales with commit count, the
-/// busiest cell outlined; each cell carries a hover title (day · hour · count).
+/// The cadence punchcard as one CSS grid: the all-time *rhythm* (cell opacity = commit
+/// count, busiest cell outlined), with the *shift* — which weekdays and hours are heating
+/// or cooling lately — marked on the grid's own axes: a ▴/▾ above an hour column and
+/// beside a weekday label (warm = heating, cool = cooling). Cells and markers carry hover
+/// titles. No second grid — the row/column markers annotate the rhythm itself.
 fn report_heatmap(h: &Heatmap) -> String {
     if h.total == 0 {
         return "<p class=empty>(no commits)</p>".to_string();
     }
-    let mut g = String::from("<div class=hgrid><span class=hcorner></span>");
+    // (glyph, CSS class) for a margin's shift; both derive from the shared `shift_glyph`
+    // bucketing so the report can't grade a slot differently than the terminal. "" = steady.
+    let mark = |z: f64| -> (&'static str, &'static str) {
+        match shift_glyph(z) {
+            Some(g) => (g, if z > 0.0 { "heat" } else { "cool" }),
+            None => ("", ""),
+        }
+    };
+    let shift_title = |z: f64| -> String {
+        match shift_glyph(z) {
+            None => "steady".to_string(),
+            Some(_) => {
+                let dir = if z > 0.0 { "heating" } else { "cooling" };
+                format!("{dir} {:.1}σ vs usual", z.abs())
+            }
+        }
+    };
+
+    let mut g = String::from("<div class=hgrid>");
+    // Header row 1: hour-shift markers, over the columns. Row 2: hour ticks (every 3h).
+    g.push_str("<span class=hcorner></span>");
+    for hh in 0..24 {
+        let (ch, cls) = mark(h.hour_shift[hh]);
+        g.push_str(&format!(
+            "<span class=\"hmark {cls}\" title=\"{hh:02}:00 · {}\">{ch}</span>",
+            shift_title(h.hour_shift[hh])
+        ));
+    }
+    g.push_str("<span class=hcorner></span>");
     for hh in 0..24 {
         let lbl = if hh % 3 == 0 {
             hh.to_string()
@@ -1025,8 +1147,15 @@ fn report_heatmap(h: &Heatmap) -> String {
         };
         g.push_str(&format!("<span class=hhour>{lbl}</span>"));
     }
+    // Day rows: label tagged with its weekday-shift marker; cells shaded by raw count.
     for (d, row) in h.counts.iter().enumerate() {
-        g.push_str(&format!("<span class=hday>{}</span>", DAYS[d]));
+        let (ch, cls) = mark(h.day_shift[d]);
+        g.push_str(&format!(
+            "<span class=\"hday {cls}\" title=\"{} · {}\">{ch}{}</span>",
+            DAYS[d],
+            shift_title(h.day_shift[d]),
+            DAYS[d]
+        ));
         for (hh, &c) in row.iter().enumerate() {
             let op = if c == 0 {
                 0.0
@@ -1130,11 +1259,7 @@ fn report_branch(
     out: &mut String,
 ) {
     for (name, child) in kept_children(node, floor) {
-        let pct = if child.churn > 0.0 {
-            child.thrash / child.churn * 100.0
-        } else {
-            0.0
-        };
+        let pct = child.thrash_pct();
         let t = tone_class(thr_tone(pct));
         let w = (child.thrash / scale * 100.0).clamp(2.0, 100.0);
         let row = format!(
@@ -1159,7 +1284,7 @@ fn report_branch(
     }
 }
 
-/// Trajectory glyph for a folder (last-7d vs the 8-week pace), only when windowed.
+/// Trajectory glyph for a folder (last-7d vs its recent pace), only when windowed.
 fn report_traj(node: &TreeNode, recent: bool) -> String {
     if !recent {
         return String::new();
@@ -1184,9 +1309,15 @@ fn report_hotspots(rows: &[Hotspot], multi: bool) -> String {
     for r in &rows[..cut] {
         let w = ((r.score / max).sqrt() * 100.0).clamp(2.0, 100.0);
         let meta = if multi {
-            format!("{}× · cx {} · {}", r.freq, r.complexity, esc(&r.repo))
+            format!(
+                "{}× · cx {} · rcy {:.2} · {}",
+                r.freq,
+                r.complexity,
+                r.recency,
+                esc(&r.repo)
+            )
         } else {
-            format!("{}× · cx {}", r.freq, r.complexity)
+            format!("{}× · cx {} · rcy {:.2}", r.freq, r.complexity, r.recency)
         };
         out.push_str(&format!(
             "<div class=hrow>\

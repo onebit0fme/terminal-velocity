@@ -30,7 +30,6 @@ enum Command {
     Hotspots,
     Cadence,
     Report,
-    Explain,
 }
 
 struct Config {
@@ -54,10 +53,6 @@ struct Anchor {
 /// The filtered (repos, labels, per-repo anchors) plus an optional header note —
 /// what `resolve_anchors` hands back.
 type Resolved = (Vec<String>, Vec<String>, Vec<Anchor>, Option<String>);
-
-/// Default window for the drill-down commands — matches the cockpit's trailing
-/// 8 weeks, anchored to the latest commit. `--all` widens to full history.
-const WINDOW_SECS: i64 = 8 * 7 * 86_400;
 
 /// Newest anchored commit across all repos — the shared window anchor. With `--at`
 /// this is the as-of moment, not now, so the window trails the anchor.
@@ -323,7 +318,6 @@ fn parse_args() -> Result<Config, String> {
             "hotspots" => command = Command::Hotspots,
             "cadence" => command = Command::Cadence,
             "report" => command = Command::Report,
-            "explain" | "tree" => command = Command::Explain,
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -354,17 +348,16 @@ USAGE:
 COMMANDS:
     status      one-screen build-flow cockpit (default)
     thrash      in-place rewrite (S-weighted) ranked by directory
-    hotspots    files ranked by churn × complexity
+    hotspots    files ranked by revisions × complexity × recency
     cadence     weekday × hour commit punchcard (when commits land)
     report      write every view to one self-contained HTML page (tv-report.html)
-    explain     print the heuristic decision tree (abstract; no repo needed)
 
 OPTIONS:
     --repo <path>   analyze this repo; repeat the flag to aggregate several
                     repos into one combined history (default: current directory)
     --report        shorthand for the `report` command (works with any command)
     --no-color      disable color (also respects NO_COLOR)
-    --all           thrash/hotspots over all history (default: last 8 weeks)
+    --all           flat lifetime totals for thrash/hotspots (default: recency-weighted)
     --me            only my own commits (from git config); my rework + how long
                     the code I write survives. Self only — no per-teammate view.
     --explain       (status) expand the board: the S(age) formula + the decision
@@ -383,19 +376,19 @@ OPTIONS:
     );
 }
 
-/// Per-repo (label, change-frequency, complexity) — the hotspots inputs.
-/// `anchors` cap each repo's history at its `--at` point; `authors` (non-empty
-/// under `--me`) restricts the change counts to my commits.
+/// Per-repo (label, change-frequency, complexity) — the hotspots inputs, on the
+/// recency lens (`weight(commit_ts)`; `|_| 1.0` under `--all`). `anchors` cap each repo's
+/// history at its `--at` point; `authors` (non-empty under `--me`) restricts to my commits.
 fn repo_files(
     repos: &[String],
     labels: &[String],
     anchors: &[Anchor],
-    since: Option<i64>,
     authors: &[String],
+    weight: impl Fn(i64) -> f64 + Copy,
 ) -> Result<Vec<metrics::RepoFiles>, String> {
     let mut out = Vec::new();
     for ((repo, label), a) in repos.iter().zip(labels).zip(anchors) {
-        let f = git::file_change_freq(repo, &a.rev, since, authors)
+        let f = git::file_change_freq(repo, &a.rev, authors, weight)
             .map_err(|e| format!("{repo}: {e}"))?;
         let c =
             git::file_complexity(repo, &a.rev, a.is_head).map_err(|e| format!("{repo}: {e}"))?;
@@ -404,17 +397,19 @@ fn repo_files(
     Ok(out)
 }
 
-/// Per-repo (label, churn-by-path) — the denominator for the thrash %.
+/// Per-repo (label, recency-weighted churn-by-path) — the thrash denominator, on the
+/// cockpit's recency lens. `weight(commit_ts)` is the recency weight (or `|_| 1.0` for
+/// flat lifetime totals under `--all`).
 fn repo_churn(
     repos: &[String],
     labels: &[String],
     anchors: &[Anchor],
-    since: Option<i64>,
     authors: &[String],
+    weight: impl Fn(i64) -> f64 + Copy,
 ) -> Result<Vec<metrics::RepoChurn>, String> {
     let mut out = Vec::new();
     for ((repo, label), a) in repos.iter().zip(labels).zip(anchors) {
-        let c = git::file_churn_totals(repo, &a.rev, since, authors)
+        let c = git::file_churn_totals(repo, &a.rev, authors, weight)
             .map_err(|e| format!("{repo}: {e}"))?;
         out.push((label.clone(), c));
     }
@@ -423,12 +418,6 @@ fn repo_churn(
 
 fn run(cfg: Config) -> Result<(), String> {
     let palette = style::Palette::detect(cfg.color_off);
-
-    // Explain is pure prose — no repos, no anchor resolution.
-    if let Command::Explain = cfg.command {
-        render::print_explain(&palette);
-        return Ok(());
-    }
 
     // Resolve the `--at` anchor first: it can rewind, and even drop, repos. Every
     // pass below keys off these per-repo anchors instead of an implicit HEAD.
@@ -498,17 +487,16 @@ fn run(cfg: Config) -> Result<(), String> {
         // Hotspots to the terminal needs no blame pass; the report does, so it
         // falls through to the full pipeline below.
         Command::Hotspots if !want_report => {
-            let since = if cfg.all_time {
-                None
-            } else {
-                Some(latest_ts_across(&paths, &anchors)? - WINDOW_SECS)
-            };
-            let per_repo = repo_files(&paths, &labels, &anchors, since, &author_pats)?;
+            // Recency-weight the change-frequency on the same lens as the board; --all
+            // flattens it to raw lifetime counts. Anchor = newest commit across repos.
+            let anchor_ts = latest_ts_across(&paths, &anchors)?;
+            let weight = metrics::recency_lens(cfg.all_time, anchor_ts);
+            let per_repo = repo_files(&paths, &labels, &anchors, &author_pats, weight)?;
             let rows = metrics::hotspots(&per_repo);
             render::print_hotspots(
                 &header,
                 &rows,
-                since.is_some(),
+                !cfg.all_time,
                 multi,
                 as_of.as_deref(),
                 &palette,
@@ -527,7 +515,7 @@ fn run(cfg: Config) -> Result<(), String> {
                 return Err(empty_err());
             }
             let heat = metrics::cadence_heatmap(&commits);
-            render::print_heatmap(&heat, &header, &palette);
+            render::print_heatmap(&heat, &header, as_of.as_deref(), &palette);
             return Ok(());
         }
         _ => {}
@@ -551,24 +539,36 @@ fn run(cfg: Config) -> Result<(), String> {
         return Err(empty_err());
     }
 
-    // The window trails the anchor moment (the newest loaded commit), not now.
+    // Thrash, hotspots, and the board all ride one recency lens (recent weeks weighted
+    // most) over all history — so `tv thrash`/`tv hotspots` reconcile with `tv status`.
+    // `--all` drops the weighting for flat lifetime totals; `recent_cut` (7d) still drives
+    // the thrash tree's heating/cooling arrows. Anchor = newest loaded commit.
     let anchor_ts = commits.iter().map(|c| c.ts).max().unwrap_or(0);
-    let (since, recent_cut) = if cfg.all_time {
-        (None, None)
+    let recent_cut = if cfg.all_time {
+        None
     } else {
-        (Some(anchor_ts - WINDOW_SECS), Some(anchor_ts - 7 * 86_400))
+        Some(anchor_ts - 7 * 86_400)
     };
+    let recency_w = metrics::recency_lens(cfg.all_time, anchor_ts);
 
     if want_report {
         let cockpit =
             metrics::build_cockpit(&commits, &cols, &header, me.as_ref(), as_of.as_deref());
-        let churn = repo_churn(&paths, &labels, &anchors, since, &author_pats)?;
-        let tree = metrics::thrash_tree(&cols, &churn, since, recent_cut, multi, me.as_ref());
-        let files = repo_files(&paths, &labels, &anchors, since, &author_pats)?;
+        let churn = repo_churn(&paths, &labels, &anchors, &author_pats, recency_w)?;
+        let tree = metrics::thrash_tree(
+            &cols,
+            &churn,
+            anchor_ts,
+            cfg.all_time,
+            recent_cut,
+            multi,
+            me.as_ref(),
+        );
+        let files = repo_files(&paths, &labels, &anchors, &author_pats, recency_w)?;
         let rows = metrics::hotspots(&files);
         let heat = metrics::cadence_heatmap(&commits);
         let path = "tv-report.html";
-        render::write_report(&cockpit, &tree, &rows, &heat, since.is_some(), multi, path)?;
+        render::write_report(&cockpit, &tree, &rows, &heat, !cfg.all_time, multi, path)?;
         println!("wrote {path}");
         return Ok(());
     }
@@ -580,9 +580,17 @@ fn run(cfg: Config) -> Result<(), String> {
             render::print_cockpit(&cockpit, &palette, cfg.explain);
         }
         Command::Thrash => {
-            let churn = repo_churn(&paths, &labels, &anchors, since, &author_pats)?;
-            let tree = metrics::thrash_tree(&cols, &churn, since, recent_cut, multi, me.as_ref());
-            render::print_thrash(&header, &tree, since.is_some(), as_of.as_deref(), &palette);
+            let churn = repo_churn(&paths, &labels, &anchors, &author_pats, recency_w)?;
+            let tree = metrics::thrash_tree(
+                &cols,
+                &churn,
+                anchor_ts,
+                cfg.all_time,
+                recent_cut,
+                multi,
+                me.as_ref(),
+            );
+            render::print_thrash(&header, &tree, !cfg.all_time, as_of.as_deref(), &palette);
         }
         _ => unreachable!(),
     }
